@@ -33,6 +33,10 @@ build/
 # SSL Certificates (generated locally)
 certs/
 
+# Tunnel binaries & archives (download locally, do not commit)
+*.exe
+*.zip
+
 # Registry
 registry/
 

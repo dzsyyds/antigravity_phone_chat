@@ -1,5 +1,29 @@
 ---
 
+## v0.4.0 - Antigravity 2.0, Quota Glance, Git Diff & Android Overhaul 📱
+**Release Date:** November 25, 2026
+
+---
+
+### ⚡ Antigravity 2.0 Full Compatibility
+- **Viewport & Theme Extraction**: Neutralizes `container-type: size` and `mask-image` collapse on `[data-testid="autoscroll-viewport"]`, and extracts root inline CSS variables so dark theme styling renders accurately on mobile.
+- **Reliable Message Injection**: Detects `[data-testid="send-button"]` & busy cancel states, polls Lexical editor readiness, and adds CDP `Input.insertText` + `Enter` fallback.
+- **Dynamic Multi-Port Navigation**: Dynamically discovers live Antigravity page origin & query parameters when switching conversations.
+
+### 📊 New Mobile Power Features
+- **At-a-Glance Remaining Quota (`GET /quota`)**: Displays active model `5h` and `Weekly` remaining percentages directly on the top bar with color-coded status, caching, and a full breakdown modal with reset countdowns.
+- **Multi-Window Target Switcher (`GET /targets` · `POST /switch-target`)**: Enumerates active desktop Antigravity windows and switches targets seamlessly from mobile (with local-only WebSocket validation).
+- **Mobile Image Upload (`POST /upload-image`)**: Compresses camera photos/screenshots on-device via Canvas and attaches them directly into the desktop composer via CDP `DOM.setFileInputFiles`.
+- **Workspace Git Diff Viewer (`GET /git-status` · `GET /git-diff`)**: Inspects modified and untracked files with syntax-colored `+ / -` line diffs and path traversal protection.
+- **Task & Approval Alerts**: Optional sound, vibration, title flash, and browser notification alerts when AI generation finishes or awaits confirmation.
+
+### 🛡️ Android Crash Prevention & Keyboard Ergonomics
+- **Incremental DOM Patching + `htmlHash` Delta Cache**: Updates only changed message blocks while reusing earlier turns/images, cutting unchanged `/snapshot` responses to ~117 bytes.
+- **Zero GPU Blur Thrashing**: Removed heavy `backdrop-filter` blur layers from permanent chrome and injected chat content to prevent Android WebView/Chromium OOM crashes.
+- **Rock-Solid Soft Keyboard Pinning**: Added `interactive-widget=resizes-content`, `visualViewport` top/height locking, programmatic vs user scroll separation, IME composition guards, `Enter: Send/Newline` toggle, and tap-to-dismiss keyboard.
+
+---
+
 ## v0.3.0 - Security & Architecture Hardening 🛡️
 **Release Date:** April 07, 2026
 

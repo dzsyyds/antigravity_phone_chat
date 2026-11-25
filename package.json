@@ -1,11 +1,15 @@
 {
     "name": "ag-mobile-monitor",
-    "version": "1.0.0",
+    "version": "0.4.0",
     "type": "module",
-    "description": "Mobile web interface for monitoring Antigravity chat via visual snapshots",
+    "description": "Mobile web interface for monitoring and controlling Antigravity 2.0 sessions with real-time quota, Git diff, image upload, and Android keyboard stability",
+    "bin": {
+        "antigravity-phone-chat": "./server.js"
+    },
     "scripts": {
         "start": "node server.js",
-        "dev": "node server.js"
+        "dev": "node server.js",
+        "check": "node --check server.js && node --check public/js/app.js"
     },
     "dependencies": {
         "compression": "^1.8.1",

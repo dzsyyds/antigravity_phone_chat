@@ -12,13 +12,16 @@ import WebSocket from 'ws';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { inspectUI } from './ui_inspector.js';
-import { execSync } from 'child_process';
+import { execSync, execFile } from 'child_process';
+import { promisify } from 'util';
+
+const execFileAsync = promisify(execFile);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const PORTS = [9000, 9001, 9002, 9003];
-const POLL_INTERVAL = 1000; // 1 second
+const POLL_INTERVAL = 1500; // 1.5 seconds (balanced responsiveness & mobile memory)
 const SERVER_PORT = process.env.PORT || 3000;
 const APP_PASSWORD = process.env.APP_PASSWORD || 'antigravity';
 const AUTH_COOKIE_NAME = 'ag_auth_token';
@@ -35,8 +38,14 @@ let AUTH_TOKEN = 'ag_default_token';
 
 // Shared CDP connection
 let cdpConnection = null;
+let currentTargetUrl = null;
 let lastSnapshot = null;
 let lastSnapshotHash = null;
+let cachedCSSHash = null;
+let cachedModels = null;
+let cachedModelsAt = 0;
+let cachedQuota = null;
+let cachedQuotaAt = 0;
 
 // Kill any existing process on the server port (prevents EADDRINUSE)
 function killPortProcess(port) {
@@ -77,28 +86,28 @@ function killPortProcess(port) {
 }
 
 // Get local IP address for mobile access
-// Prefers real network IPs (192.168.x.x, 10.x.x.x) over virtual adapters (172.x.x.x from WSL/Docker)
+// Prefers physical Wi-Fi/LAN adapters over virtual adapters (VMware/WSL/Docker/Clash TUN)
 function getLocalIP() {
     const interfaces = os.networkInterfaces();
     const candidates = [];
 
     for (const name of Object.keys(interfaces)) {
+        const lowerName = name.toLowerCase();
+        const isVirtual = /vmware|vmnet|virtualbox|vbox|vethernet|wsl|docker|hyper-v|meta|clash|tun|tap|loopback/i.test(lowerName);
         for (const iface of interfaces[name]) {
-            // Skip internal and non-IPv4 addresses
             if (iface.family === 'IPv4' && !iface.internal) {
+                const rangeScore = iface.address.startsWith('192.168.') ? 1 :
+                    iface.address.startsWith('10.') ? 2 :
+                        iface.address.startsWith('172.') ? 3 : 4;
                 candidates.push({
                     address: iface.address,
                     name: name,
-                    // Prioritize common home/office network ranges
-                    priority: iface.address.startsWith('192.168.') ? 1 :
-                        iface.address.startsWith('10.') ? 2 :
-                            iface.address.startsWith('172.') ? 3 : 4
+                    priority: (isVirtual ? 10 : 0) + rangeScore
                 });
             }
         }
     }
 
-    // Sort by priority and return the best one
     candidates.sort((a, b) => a.priority - b.priority);
     return candidates.length > 0 ? candidates[0].address : 'localhost';
 }
@@ -116,7 +125,30 @@ function getJson(url) {
     });
 }
 
-// Find Antigravity CDP endpoint
+// List all discoverable Antigravity page targets across debug ports
+async function listCDPTargets() {
+    const found = [];
+    for (const port of PORTS) {
+        try {
+            const list = await getJson(`http://127.0.0.1:${port}/json/list`);
+            for (const t of list) {
+                if (t.type !== 'page' || !t.webSocketDebuggerUrl) continue;
+                const url = t.url || '';
+                if (!url || url.startsWith('data:') || url.startsWith('devtools:')) continue;
+                found.push({
+                    id: t.id,
+                    port,
+                    title: (t.title || 'Antigravity Window').trim(),
+                    url,
+                    wsUrl: t.webSocketDebuggerUrl,
+                    active: t.webSocketDebuggerUrl === currentTargetUrl
+                });
+            }
+        } catch (e) {}
+    }
+    return found;
+}
+
 // Find Antigravity CDP endpoint
 async function discoverCDP() {
     const errors = [];
@@ -124,10 +156,19 @@ async function discoverCDP() {
         try {
             const list = await getJson(`http://127.0.0.1:${port}/json/list`);
 
+            // Priority 0: Antigravity 2.0 Conversation Window
+            const ag2 = list.find(t => t.type === 'page' && t.url && !t.url.startsWith('data:') && (t.title?.includes('Antigravity') || t.url?.includes('/c/')) && t.webSocketDebuggerUrl);
+            if (ag2) {
+                console.log('Found Antigravity 2.0 target:', ag2.title);
+                currentTargetUrl = ag2.webSocketDebuggerUrl;
+                return { port, url: ag2.webSocketDebuggerUrl };
+            }
+
             // Priority 1: Standard Workbench (The main window)
             const workbench = list.find(t => t.url?.includes('workbench.html') || (t.title && t.title.includes('workbench')));
             if (workbench && workbench.webSocketDebuggerUrl) {
                 console.log('Found Workbench target:', workbench.title);
+                currentTargetUrl = workbench.webSocketDebuggerUrl;
                 return { port, url: workbench.webSocketDebuggerUrl };
             }
 
@@ -135,6 +176,7 @@ async function discoverCDP() {
             const jetski = list.find(t => t.url?.includes('jetski') || t.title === 'Launchpad');
             if (jetski && jetski.webSocketDebuggerUrl) {
                 console.log('Found Jetski/Launchpad target:', jetski.title);
+                currentTargetUrl = jetski.webSocketDebuggerUrl;
                 return { port, url: jetski.webSocketDebuggerUrl };
             }
         } catch (e) {
@@ -145,12 +187,37 @@ async function discoverCDP() {
     throw new Error(`CDP not found. ${errorSummary}`);
 }
 
+// Switch active CDP connection to another Antigravity window
+async function switchCDPTarget(wsUrl) {
+    if (!wsUrl || !/^ws:\/\/(127\.0\.0\.1|localhost):\d+\//.test(wsUrl)) {
+        throw new Error('Invalid local CDP WebSocket URL');
+    }
+    const oldConn = cdpConnection;
+    const nextConn = await connectCDP(wsUrl);
+    cdpConnection = nextConn;
+    currentTargetUrl = wsUrl;
+    lastSnapshot = null;
+    lastSnapshotHash = null;
+    cachedModels = null;
+    cachedModelsAt = 0;
+    cachedQuota = null;
+    cachedQuotaAt = 0;
+    if (oldConn?.ws && oldConn.ws !== nextConn.ws) {
+        try { oldConn.ws.close(); } catch (e) {}
+    }
+    return nextConn;
+}
+
 // Connect to CDP
 async function connectCDP(url) {
     const ws = new WebSocket(url);
     await new Promise((resolve, reject) => {
         ws.on('open', resolve);
         ws.on('error', reject);
+    });
+
+    ws.on('error', (err) => {
+        console.warn('⚠️ CDP WebSocket error:', err.message);
     });
 
     let idCounter = 1;
@@ -210,9 +277,16 @@ async function connectCDP(url) {
 // Capture chat snapshot
 async function captureSnapshot(cdp) {
     const CAPTURE_SCRIPT = `(async () => {
-        const cascade = document.getElementById('conversation') || document.getElementById('chat') || document.getElementById('cascade');
+        const scrollCandidates = Array.from(document.querySelectorAll('[data-testid="autoscroll-viewport"], .overflow-y-auto, [data-scroll-area]'));
+        const cascade = document.querySelector('[data-testid="autoscroll-viewport"]') ||
+                        document.getElementById('conversation') || 
+                        document.getElementById('chat') || 
+                        document.getElementById('cascade') ||
+                        scrollCandidates.find(s => s.scrollHeight > s.clientHeight && s.clientHeight > 200) ||
+                        scrollCandidates[0] ||
+                        document.getElementById('root') ||
+                        document.body;
         if (!cascade) {
-            // Debug info
             const body = document.body;
             const childIds = Array.from(body.children).map(c => c.id).filter(id => id).join(', ');
             return { error: 'chat container not found', debug: { hasBody: !!body, availableIds: childIds } };
@@ -221,7 +295,9 @@ async function captureSnapshot(cdp) {
         const cascadeStyles = window.getComputedStyle(cascade);
         
         // Find the main scrollable container
-        const scrollContainer = cascade.querySelector('.overflow-y-auto, [data-scroll-area]') || cascade;
+        const scrollContainer = cascade.matches('[data-testid="autoscroll-viewport"]')
+            ? cascade
+            : (cascade.querySelector('[data-testid="autoscroll-viewport"], .overflow-y-auto, [data-scroll-area]') || cascade);
         const scrollInfo = {
             scrollTop: scrollContainer.scrollTop,
             scrollHeight: scrollContainer.scrollHeight,
@@ -230,7 +306,6 @@ async function captureSnapshot(cdp) {
         };
         
         // Mark fixed/absolute elements in the original DOM before cloning
-        // This is the only way to reliably catch CSS-class-based positioning
         const candidates = cascade.querySelectorAll('*');
         candidates.forEach(el => {
             try {
@@ -246,11 +321,27 @@ async function captureSnapshot(cdp) {
         
         // Clean up markers from the original DOM immediately after cloning
         candidates.forEach(el => el.removeAttribute('data-ag-rem'));
+
+        // Optimize container padding and neutralize desktop size-containment/masks for mobile viewport
+        const vpTargets = [clone, ...clone.querySelectorAll('[data-testid="autoscroll-viewport"]')];
+        vpTargets.forEach(vp => {
+            if (vp && vp.style) {
+                vp.style.paddingLeft = '12px';
+                vp.style.paddingRight = '12px';
+                vp.style.maskImage = 'none';
+                vp.style.webkitMaskImage = 'none';
+                vp.style.containerType = 'normal';
+                vp.style.height = 'auto';
+                vp.style.minHeight = '0';
+                vp.style.overflow = 'visible';
+            }
+        });
         
         // Aggressively remove the entire interaction/input/review area
         try {
-            // 1. Identify common interaction wrappers by class combinations
             const interactionSelectors = [
+                '.surface-composer',
+                '.surface-composer-card',
                 '.relative.flex.flex-col.gap-8',
                 '.flex.grow.flex-col.justify-start.gap-8',
                 'div[class*="interaction-area"]',
@@ -259,7 +350,6 @@ async function captureSnapshot(cdp) {
                 '[contenteditable="true"]',
                 '[data-lexical-editor]',
                 'form',
-                // New aggressive selectors for recent Antigravity versions
                 '.mx-8.mb-8',
                 '.mx-4.mb-4',
                 '.fixed.bottom-0',
@@ -269,17 +359,20 @@ async function captureSnapshot(cdp) {
             interactionSelectors.forEach(selector => {
                 clone.querySelectorAll(selector).forEach(el => {
                     try {
-                        // Protect elements that contain interactive buttons the user might need
                         const text = (el.innerText || '').toLowerCase();
                         const isActionArea = text.includes('allow') || text.includes('deny') || 
                                            text.includes('review') || text.includes('run') ||
-                                           text.includes('confirm');
+                                           text.includes('confirm') || text.includes('允许') ||
+                                           text.includes('拒绝') || text.includes('确认') ||
+                                           text.includes('运行') || text.includes('评审');
                         
-                        // BUT: If it's specifically an input-related element, we DON'T protect it
                         const isEditor = el.getAttribute('contenteditable') === 'true' || 
                                        el.hasAttribute('data-lexical-editor') ||
+                                       el.classList?.contains('surface-composer') ||
+                                       el.classList?.contains('surface-composer-card') ||
                                        text.includes('ask anything') ||
-                                       text.includes('to mention');
+                                       text.includes('to mention') ||
+                                       text.includes('提问任何问题');
                         if (!isEditor && isActionArea && selector !== '[contenteditable="true"]') {
                             return; // Protect action bars
                         }
@@ -317,16 +410,16 @@ async function captureSnapshot(cdp) {
                     const placeholder = (el.getAttribute('placeholder') || '').toLowerCase();
                     const isInputPlaceholder = text.includes('ask anything') || 
                                               text.includes('to mention') || 
-                                              placeholder.includes('ask anything');
+                                              text.includes('提问任何问题') ||
+                                              placeholder.includes('ask anything') ||
+                                              placeholder.includes('提问任何问题');
                     
-                    // IF it's the main chat box (contains placeholder text), remove its container
-                    if (isInputPlaceholder) {
-                        // Find the container (usually a few levels up)
+                    if (isInputPlaceholder && text.length < 150) {
                         let container = el;
                         for (let i = 0; i < 5; i++) {
                             if (!container.parentElement || container.parentElement === clone) break;
                             const cls = (container.className || '').toString();
-                            if (cls.includes('flex-col') || cls.includes('input') || cls.includes('area')) {
+                            if (cls.includes('flex-col') || cls.includes('input') || cls.includes('area') || cls.includes('composer')) {
                                 container.remove();
                                 return;
                             }
@@ -339,16 +432,13 @@ async function captureSnapshot(cdp) {
             });
 
             // 3. NUCLEAR: If any editor or redundant UI remains, remove its entire branch
-            const redundantElements = clone.querySelectorAll('[contenteditable="true"], [data-lexical-editor], [role="textbox"], form, .mx-8.mb-8, .mx-4.mb-4');
+            const redundantElements = clone.querySelectorAll('.surface-composer, .surface-composer-card, [contenteditable="true"], [data-lexical-editor], [role="textbox"], form, .mx-8.mb-8, .mx-4.mb-4');
             redundantElements.forEach(el => {
                 try {
                     let branch = el;
-                    // Go up to find the highest container that is still within the clone
-                    // This ensures we remove the entire "box" (with chips, submit btn, etc)
                     while (branch.parentElement && branch.parentElement !== clone) {
                         const p = branch.parentElement;
                         const pCls = (p.className || '').toString().toLowerCase();
-                        // Stop going up if we hit a main message/conversation wrapper
                         if (pCls.includes('message') || pCls.includes('bubble') || pCls.includes('conversation')) break;
                         branch = p;
                     }
@@ -358,12 +448,10 @@ async function captureSnapshot(cdp) {
             });
 
             // 4. Force hide any fixed/absolute elements (desktop overlays)
-            // These were marked in the original before cloning to ensure accurate computed styles
             clone.querySelectorAll('[data-ag-rem]').forEach(el => {
                 try {
                     const text = (el.innerText || '').toLowerCase();
-                    // Exclude Action Bars we want to keep
-                    if (text.includes('allow') || text.includes('deny') || text.includes('review')) {
+                    if (text.includes('allow') || text.includes('deny') || text.includes('review') || text.includes('允许') || text.includes('拒绝') || text.includes('确认') || text.includes('运行') || text.includes('评审')) {
                         el.removeAttribute('data-ag-rem');
                         return;
                     }
@@ -434,7 +522,11 @@ async function captureSnapshot(cdp) {
                 }
             } catch (e) { }
         }
-        const allCSS = rules.join('\\n');
+        // Extract inline CSS custom properties from <html> and <body> (critical for Antigravity 2.0 dark theme variables)
+        const htmlInlineStyle = document.documentElement.getAttribute('style') || '';
+        const bodyInlineStyle = document.body?.getAttribute('style') || '';
+        const rootVarsRule = ':root, html, body { ' + htmlInlineStyle + '; ' + bodyInlineStyle + '; }';
+        const allCSS = rootVarsRule + '\\n' + rules.join('\\n');
         
         return {
             html: html,
@@ -488,11 +580,11 @@ async function injectMessage(cdp, text) {
     // Use JSON.stringify for robust escaping (handles ", \, newlines, backticks, unicode, etc.)
     const safeText = JSON.stringify(text);
 
-    const EXPRESSION = `(async () => {
-        const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
+    const PREPARE_EXPR = `(async () => {
+        const cancel = document.querySelector('[data-testid="input-cancel-button"], button[aria-label*="取消"], [data-tooltip-id="input-send-button-cancel-tooltip"]');
         if (cancel && cancel.offsetParent !== null) return { ok:false, reason:"busy" };
 
-        const editors = [...document.querySelectorAll('#conversation [contenteditable="true"], #chat [contenteditable="true"], #cascade [contenteditable="true"]')]
+        const editors = [...document.querySelectorAll('[contenteditable="true"], [data-lexical-editor="true"], [data-lexical-editor], textarea, #conversation [contenteditable="true"]')]
             .filter(el => el.offsetParent !== null);
         const editor = editors.at(-1);
         if (!editor) return { ok:false, error:"editor_not_found" };
@@ -500,130 +592,158 @@ async function injectMessage(cdp, text) {
         const textToInsert = ${safeText};
 
         editor.focus();
-        document.execCommand?.("selectAll", false, null);
-        document.execCommand?.("delete", false, null);
+        if ((editor.innerText || '').trim().length > 0) {
+            try {
+                const sel = window.getSelection();
+                const range = document.createRange();
+                range.selectNodeContents(editor);
+                sel.removeAllRanges();
+                sel.addRange(range);
+            } catch {}
+            document.execCommand?.("selectAll", false, null);
+            document.execCommand?.("delete", false, null);
+            await new Promise(r => setTimeout(r, 30));
+        }
 
         let inserted = false;
-        try { inserted = !!document.execCommand?.("insertText", false, textToInsert); } catch {}
-        if (!inserted) {
-            editor.textContent = textToInsert;
-            editor.dispatchEvent(new InputEvent("beforeinput", { bubbles:true, inputType:"insertText", data: textToInsert }));
-            editor.dispatchEvent(new InputEvent("input", { bubbles:true, inputType:"insertText", data: textToInsert }));
+        if ((editor.innerText || '').trim().length === 0) {
+            try { inserted = !!document.execCommand?.("insertText", false, textToInsert); } catch {}
+        }
+        if (!inserted || !(editor.innerText || '').trim()) {
+            return {
+                ok: false,
+                needsCdpFallback: true,
+                editorHasText: !!(editor.innerText || '').trim(),
+                submitFound: false,
+                submitDisabled: true
+            };
         }
 
-        await new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r)));
+        const findSendBtn = () =>
+            document.querySelector('[data-testid="send-button"]') ||
+            document.querySelector('button[aria-label="发送消息"]') ||
+            document.querySelector('button[aria-label*="发送"]') ||
+            document.querySelector("svg.lucide-arrow-right")?.closest("button") ||
+            document.querySelector("button[aria-label*='Send'], button[aria-label*='send'], button[type='submit']") ||
+            document.querySelector("button:has(svg.lucide-arrow-up), button:has(svg.lucide-corner-down-left)");
 
-        const submit = document.querySelector("svg.lucide-arrow-right")?.closest("button");
-        if (submit && !submit.disabled) {
-            submit.click();
-            return { ok:true, method:"click_submit" };
+        // Poll up to 450ms for Lexical/React to enable the send button
+        let submit = null;
+        for (let i = 0; i < 9; i++) {
+            await new Promise(r => setTimeout(r, 50));
+            submit = findSendBtn();
+            if (submit && !submit.disabled && submit.getAttribute('aria-disabled') !== 'true') {
+                submit.click();
+                return { ok:true, method:"click_submit", attempt:i };
+            }
         }
 
-        // Submit button not found, but text is inserted - trigger Enter key
-        editor.dispatchEvent(new KeyboardEvent("keydown", { bubbles:true, key:"Enter", code:"Enter" }));
-        editor.dispatchEvent(new KeyboardEvent("keyup", { bubbles:true, key:"Enter", code:"Enter" }));
-        
-        return { ok:true, method:"enter_keypress" };
+        return {
+            ok: false,
+            needsCdpFallback: true,
+            editorHasText: !!(editor.innerText || '').trim(),
+            submitFound: !!submit,
+            submitDisabled: submit ? (submit.disabled || submit.getAttribute('aria-disabled') === 'true') : null
+        };
     })()`;
 
+    const CLICK_OR_ENTER_EXPR = `(async () => {
+        const findSendBtn = () =>
+            document.querySelector('[data-testid="send-button"]') ||
+            document.querySelector('button[aria-label="发送消息"]') ||
+            document.querySelector('button[aria-label*="发送"]') ||
+            document.querySelector("svg.lucide-arrow-right")?.closest("button") ||
+            document.querySelector("button[aria-label*='Send'], button[aria-label*='send'], button[type='submit']");
+        for (let i = 0; i < 6; i++) {
+            await new Promise(r => setTimeout(r, 50));
+            const submit = findSendBtn();
+            if (submit && !submit.disabled && submit.getAttribute('aria-disabled') !== 'true') {
+                submit.click();
+                return { ok:true, method:"cdp_click_submit" };
+            }
+        }
+        return { ok:false };
+    })()`;
+
+    let lastVal = null;
     for (const ctx of cdp.contexts) {
         try {
             const result = await cdp.call("Runtime.evaluate", {
-                expression: EXPRESSION,
+                expression: PREPARE_EXPR,
                 returnByValue: true,
                 awaitPromise: true,
                 contextId: ctx.id
             });
 
-            if (result.result && result.result.value) {
-                return result.result.value;
+            const val = result.result?.value;
+            if (!val) continue;
+            lastVal = val;
+
+            if (val.ok || val.reason === "busy") {
+                return val;
+            }
+
+            if (val.needsCdpFallback) {
+                // Use native CDP Input APIs if Lexical still had text or didn't pick up synthetic DOM insert
+                await cdp.call("Input.dispatchKeyEvent", { type: "keyDown", modifiers: 2, key: "a", code: "KeyA", windowsVirtualKeyCode: 65 }).catch(() => {});
+                await cdp.call("Input.dispatchKeyEvent", { type: "keyUp", modifiers: 2, key: "a", code: "KeyA", windowsVirtualKeyCode: 65 }).catch(() => {});
+                await cdp.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 }).catch(() => {});
+                await cdp.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Backspace", code: "Backspace", windowsVirtualKeyCode: 8 }).catch(() => {});
+                await cdp.call("Input.insertText", { text }).catch(() => {});
+                const retry = await cdp.call("Runtime.evaluate", {
+                    expression: CLICK_OR_ENTER_EXPR,
+                    returnByValue: true,
+                    awaitPromise: true,
+                    contextId: ctx.id
+                });
+                if (retry.result?.value?.ok) return retry.result.value;
+
+                // Final fallback: real Enter key via CDP Input.dispatchKeyEvent
+                await cdp.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }).catch(() => {});
+                await cdp.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, nativeVirtualKeyCode: 13 }).catch(() => {});
+                return { ok: true, method: "cdp_enter_keypress" };
             }
         } catch (e) { }
     }
 
-    return { ok: false, reason: "no_context" };
+    return lastVal || { ok: false, reason: "no_context" };
 }
 
-// Set functionality mode (Fast vs Planning)
+// Set functionality mode (Fast/Turbo vs Planning/Review)
 async function setMode(cdp, mode) {
-    if (!['Fast', 'Planning'].includes(mode)) return { error: 'Invalid mode' };
+    const isTurbo = /turbo|fast|极速/i.test(mode);
+    const isReview = /review|plan|审查/i.test(mode);
+    if (!isTurbo && !isReview) return { error: 'Invalid mode: ' + mode };
+
+    const targetKeyword = isTurbo ? '极速' : '审查';
 
     const EXP = `(async () => {
         try {
-            // STRATEGY: Find the element that IS the current mode indicator.
-            // It will have text 'Fast' or 'Planning'.
-            // It might not be a <button>, could be a <div> with cursor-pointer.
-            
-            // 1. Get all elements with text 'Fast' or 'Planning'
-            const allEls = Array.from(document.querySelectorAll('*'));
-            const candidates = allEls.filter(el => {
-                // Must have single text node child to avoid parents
-                if (el.children.length > 0) return false;
-                const txt = el.textContent.trim();
-                return txt === 'Fast' || txt === 'Planning';
-            });
+            let btn = document.querySelector('[data-testid="permissions-selector-trigger"], button[aria-label*="preset selector"], button[aria-label*="permissions"]');
+            if (!btn) {
+                const allButtons = Array.from(document.querySelectorAll('button'));
+                btn = allButtons.find(b => /turbo|极速|审查/i.test(b.innerText || b.getAttribute('aria-label') || ''));
+            }
+            if (!btn) return { error: 'Permissions/Mode button not found' };
 
-            // 2. Find the one that looks interactive (cursor-pointer)
-            // Traverse up from text node to find clickable container
-            let modeBtn = null;
-            
-            for (const el of candidates) {
-                let current = el;
-                // Go up max 4 levels
-                for (let i = 0; i < 4; i++) {
-                    if (!current) break;
-                    const style = window.getComputedStyle(current);
-                    if (style.cursor === 'pointer' || current.tagName === 'BUTTON') {
-                        modeBtn = current;
-                        break;
-                    }
-                    current = current.parentElement;
-                }
-                if (modeBtn) break;
+            const curText = (btn.innerText || '').trim();
+            if (curText.includes('${targetKeyword}')) {
+                return { success: true, alreadySet: true, mode: curText };
             }
 
-            if (!modeBtn) return { error: 'Mode indicator/button not found' };
+            btn.click();
+            await new Promise(r => setTimeout(r, 400));
 
-            // Check if already set
-            if (modeBtn.innerText.includes('${mode}')) return { success: true, alreadySet: true };
-
-            // 3. Click to open menu
-            modeBtn.click();
-            await new Promise(r => setTimeout(r, 600));
-
-            // 4. Find the dialog
-            let visibleDialog = Array.from(document.querySelectorAll('[role="dialog"]'))
-                                    .find(d => d.offsetHeight > 0 && d.innerText.includes('${mode}'));
-            
-            // Fallback: Just look for any new visible container if role=dialog is missing
-            if (!visibleDialog) {
-                // Maybe it's not role=dialog? Look for a popover-like div
-                 visibleDialog = Array.from(document.querySelectorAll('div'))
-                    .find(d => {
-                        const style = window.getComputedStyle(d);
-                        return d.offsetHeight > 0 && 
-                               (style.position === 'absolute' || style.position === 'fixed') && 
-                               d.innerText.includes('${mode}') &&
-                               !d.innerText.includes('Files With Changes'); // Anti-context menu
-                    });
-            }
-
-            if (!visibleDialog) return { error: 'Dropdown not opened or options not visible' };
-
-            // 5. Click the option
-            const allDialogEls = Array.from(visibleDialog.querySelectorAll('*'));
-            const target = allDialogEls.find(el => 
-                el.children.length === 0 && el.textContent.trim() === '${mode}'
-            );
-
-            if (target) {
-                target.click();
+            const items = Array.from(document.querySelectorAll('.agy-overlay-item, [role="menuitem"], .agy-overlay button'));
+            const targetItem = items.find(el => (el.innerText || '').includes('${targetKeyword}'));
+            if (targetItem) {
+                targetItem.click();
                 await new Promise(r => setTimeout(r, 200));
-                return { success: true };
+                return { success: true, switchedTo: '${targetKeyword}' };
             }
-            
-            return { error: 'Mode option text not found in dialog. Dialog text: ' + visibleDialog.innerText.substring(0, 50) };
 
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            return { error: 'Mode option "${targetKeyword}" not found in dropdown' };
         } catch(err) {
             return { error: 'JS Error: ' + err.toString() };
         }
@@ -646,14 +766,12 @@ async function setMode(cdp, mode) {
 // Stop Generation
 async function stopGeneration(cdp) {
     const EXP = `(async () => {
-        // Look for the cancel button
-        const cancel = document.querySelector('[data-tooltip-id="input-send-button-cancel-tooltip"]');
+        const cancel = document.querySelector('[data-testid="input-cancel-button"], button[aria-label*="取消"], button[aria-label*="Cancel"], [data-tooltip-id="input-send-button-cancel-tooltip"]');
         if (cancel && cancel.offsetParent !== null) {
             cancel.click();
             return { success: true };
         }
         
-        // Fallback: Look for a square icon in the send button area
         const stopBtn = document.querySelector('button svg.lucide-square')?.closest('button');
         if (stopBtn && stopBtn.offsetParent !== null) {
             stopBtn.click();
@@ -683,10 +801,8 @@ async function clickElement(cdp, { selector, index, textContent }) {
 
     const EXP = `(async () => {
         try {
-            // Priority: Search inside the chat container first for better accuracy
-            const root = document.getElementById('conversation') || document.getElementById('chat') || document.getElementById('cascade') || document;
+            const root = document.querySelector('[data-testid="autoscroll-viewport"]') || document.getElementById('conversation') || document.getElementById('chat') || document.getElementById('cascade') || document;
             
-            // Strategy: Find all elements matching the selector
             let elements = Array.from(root.querySelectorAll('${selector}'));
             
             const filterText = ${safeText};
@@ -694,12 +810,9 @@ async function clickElement(cdp, { selector, index, textContent }) {
                 elements = elements.filter(el => {
                     const txt = (el.innerText || el.textContent || '').trim();
                     const firstLine = txt.split('\\n')[0].trim();
-                    // Match if first line matches (thought blocks) or if it contains the label (buttons)
                     return firstLine === filterText || txt.includes(filterText);
                 });
                 
-                // CRITICAL: If elements are nested (e.g. <div><span>Text</span></div>), 
-                // both will match. We only want the most specific (inner-most) one.
                 elements = elements.filter(el => {
                     return !elements.some(other => other !== el && el.contains(other));
                 });
@@ -708,7 +821,6 @@ async function clickElement(cdp, { selector, index, textContent }) {
             const target = elements[${index}];
 
             if (target) {
-                // Focus and Click
                 if (target.focus) target.focus();
                 target.click();
                 return { success: true, found: elements.length, indexUsed: ${index} };
@@ -729,7 +841,6 @@ async function clickElement(cdp, { selector, index, textContent }) {
                 contextId: ctx.id
             });
             if (res.result?.value?.success) return res.result.value;
-            // If we found it but click didn't return success (unlikely with this script), continue to next context
         } catch (e) { }
     }
     return { error: 'Click failed in all contexts or element not found at index' };
@@ -737,19 +848,14 @@ async function clickElement(cdp, { selector, index, textContent }) {
 
 // Remote scroll - sync phone scroll to desktop
 async function remoteScroll(cdp, { scrollTop, scrollPercent }) {
-    // Try to scroll the chat container in Antigravity
     const EXPRESSION = `(async () => {
         try {
-            // Find the main scrollable chat container
-            const scrollables = [...document.querySelectorAll('#conversation [class*="scroll"], #chat [class*="scroll"], #cascade [class*="scroll"], #conversation [style*="overflow"], #chat [style*="overflow"], #cascade [style*="overflow"]')]
-                .filter(el => el.scrollHeight > el.clientHeight);
-            
-            // Also check for the main chat area
-            const chatArea = document.querySelector('#conversation .overflow-y-auto, #chat .overflow-y-auto, #cascade .overflow-y-auto, #conversation [data-scroll-area], #chat [data-scroll-area], #cascade [data-scroll-area]');
-            if (chatArea) scrollables.unshift(chatArea);
+            const viewport = document.querySelector('[data-testid="autoscroll-viewport"]');
+            const scrollables = viewport ? [viewport] : [
+                ...document.querySelectorAll('#conversation [class*="scroll"], #chat [class*="scroll"], #cascade [class*="scroll"], .overflow-y-auto')
+            ].filter(el => el.scrollHeight > el.clientHeight);
             
             if (scrollables.length === 0) {
-                // Fallback: scroll the main container element
                 const cascade = document.getElementById('conversation') || document.getElementById('chat') || document.getElementById('cascade');
                 if (cascade && cascade.scrollHeight > cascade.clientHeight) {
                     scrollables.push(cascade);
@@ -760,9 +866,8 @@ async function remoteScroll(cdp, { scrollTop, scrollPercent }) {
             
             const target = scrollables[0];
             
-            // Use percentage-based scrolling for better sync
-            if (${scrollPercent} !== undefined) {
-                const maxScroll = target.scrollHeight - target.clientHeight;
+            if (${scrollPercent} !== undefined && !isNaN(${scrollPercent})) {
+                const maxScroll = Math.max(0, target.scrollHeight - target.clientHeight);
                 target.scrollTop = maxScroll * ${scrollPercent};
             } else {
                 target.scrollTop = ${scrollTop || 0};
@@ -790,126 +895,52 @@ async function remoteScroll(cdp, { scrollTop, scrollPercent }) {
 
 // Set AI Model
 async function setModel(cdp, modelName) {
+    const safeModelName = JSON.stringify(modelName || '');
+
     const EXP = `(async () => {
         try {
-            // STRATEGY: Multi-layered approach to find and click the model selector
-            const KNOWN_KEYWORDS = ["Gemini", "Claude", "GPT", "Model"];
-            
-            let modelBtn = null;
-            
-            // Strategy 1: Look for data-tooltip-id patterns (most reliable)
-            modelBtn = document.querySelector('[data-tooltip-id*="model"], [data-tooltip-id*="provider"]');
-            
-            // Strategy 2: Look for buttons/elements containing model keywords with SVG icons
-            if (!modelBtn) {
-                const candidates = Array.from(document.querySelectorAll('button, [role="button"], div, span'))
-                    .filter(el => {
-                        const txt = el.innerText?.trim() || '';
-                        return KNOWN_KEYWORDS.some(k => txt.includes(k)) && el.offsetParent !== null;
-                    });
-
-                // Find the best one (has chevron icon or cursor pointer)
-                modelBtn = candidates.find(el => {
-                    const style = window.getComputedStyle(el);
-                    const hasSvg = el.querySelector('svg.lucide-chevron-up') || 
-                                   el.querySelector('svg.lucide-chevron-down') || 
-                                   el.querySelector('svg[class*="chevron"]') ||
-                                   el.querySelector('svg');
-                    return (style.cursor === 'pointer' || el.tagName === 'BUTTON') && hasSvg;
-                }) || candidates[0];
+            let btn = document.querySelector('[data-testid="model-selector-trigger"], button[aria-label*="Select model"]');
+            if (!btn) {
+                const allButtons = Array.from(document.querySelectorAll('button'));
+                btn = allButtons.find(b => /gemini|claude|gpt|model/i.test(b.innerText || b.getAttribute('aria-label') || ''));
             }
+            if (!btn) return { error: 'Model selector button not found' };
+
+            const curText = (btn.innerText || '').trim();
+            const requested = ${safeModelName};
+            if (curText.toLowerCase().includes(requested.toLowerCase())) {
+                return { success: true, alreadySet: true, model: curText };
+            }
+
+            btn.click();
+            await new Promise(r => setTimeout(r, 400));
+
+            const items = Array.from(document.querySelectorAll('.agy-overlay-item, [role="menuitem"], .agy-overlay button'));
             
-            // Strategy 3: Traverse from text nodes up to clickable parents
-            if (!modelBtn) {
-                const allEls = Array.from(document.querySelectorAll('*'));
-                const textNodes = allEls.filter(el => {
-                    if (el.children.length > 0) return false;
-                    const txt = el.textContent;
-                    return KNOWN_KEYWORDS.some(k => txt.includes(k));
+            // 1. Partial or exact text match
+            let target = items.find(el => {
+                const txt = (el.innerText || '').trim();
+                return txt.toLowerCase().includes(requested.toLowerCase()) || requested.toLowerCase().includes(txt.toLowerCase());
+            });
+
+            // 2. Keyword fallback (Gemini / Claude / Sonnet / Opus / GPT / 120B)
+            if (!target) {
+                const keywords = requested.toLowerCase().split(/[\\s()]+/).filter(w => w.length >= 3);
+                target = items.find(el => {
+                    const txt = (el.innerText || '').toLowerCase();
+                    return keywords.some(k => txt.includes(k));
                 });
-
-                for (const el of textNodes) {
-                    let current = el;
-                    for (let i = 0; i < 5; i++) {
-                        if (!current) break;
-                        if (current.tagName === 'BUTTON' || window.getComputedStyle(current).cursor === 'pointer') {
-                            modelBtn = current;
-                            break;
-                        }
-                        current = current.parentElement;
-                    }
-                    if (modelBtn) break;
-                }
-            }
-
-            if (!modelBtn) return { error: 'Model selector button not found' };
-
-            // Click to open menu
-            modelBtn.click();
-            await new Promise(r => setTimeout(r, 600));
-
-            // Find the dialog/dropdown - search globally (React portals render at body level)
-            let visibleDialog = null;
-            
-            // Try specific dialog patterns first
-            const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [role="listbox"], [role="menu"], [data-radix-popper-content-wrapper]'));
-            visibleDialog = dialogs.find(d => d.offsetHeight > 0 && d.innerText?.includes('${modelName}'));
-            
-            // Fallback: look for positioned divs
-            if (!visibleDialog) {
-                visibleDialog = Array.from(document.querySelectorAll('div'))
-                    .find(d => {
-                        const style = window.getComputedStyle(d);
-                        return d.offsetHeight > 0 && 
-                               (style.position === 'absolute' || style.position === 'fixed') && 
-                               d.innerText?.includes('${modelName}') && 
-                               !d.innerText?.includes('Files With Changes');
-                    });
-            }
-
-            if (!visibleDialog) {
-                // Blind search across entire document as last resort
-                const allElements = Array.from(document.querySelectorAll('[role="menuitem"], [role="option"]'));
-                const target = allElements.find(el => 
-                    el.offsetParent !== null && 
-                    (el.innerText?.trim() === '${modelName}' || el.innerText?.includes('${modelName}'))
-                );
-                if (target) {
-                    target.click();
-                    return { success: true, method: 'blind_search' };
-                }
-                return { error: 'Model list not opened' };
-            }
-
-            // Select specific model inside the dialog
-            const allDialogEls = Array.from(visibleDialog.querySelectorAll('*'));
-            const validEls = allDialogEls.filter(el => el.children.length === 0 && el.textContent?.trim().length > 0);
-            
-            // A. Exact Match (Best)
-            let target = validEls.find(el => el.textContent.trim() === '${modelName}');
-            
-            // B. Page contains Model
-            if (!target) {
-                target = validEls.find(el => el.textContent.includes('${modelName}'));
-            }
-
-            // C. Closest partial match
-            if (!target) {
-                const partialMatches = validEls.filter(el => '${modelName}'.includes(el.textContent.trim()));
-                if (partialMatches.length > 0) {
-                    partialMatches.sort((a, b) => b.textContent.trim().length - a.textContent.trim().length);
-                    target = partialMatches[0];
-                }
             }
 
             if (target) {
-                target.scrollIntoView({block: 'center'});
+                target.scrollIntoView({ block: 'center' });
                 target.click();
                 await new Promise(r => setTimeout(r, 200));
-                return { success: true };
+                return { success: true, switchedTo: requested };
             }
 
-            return { error: 'Model "${modelName}" not found in list. Visible: ' + visibleDialog.innerText.substring(0, 100) };
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            return { error: 'Model option not found in dropdown. Available: ' + items.map(i => i.innerText.trim()).join(' | ') };
         } catch(err) {
             return { error: 'JS Error: ' + err.toString() };
         }
@@ -929,54 +960,23 @@ async function setModel(cdp, modelName) {
     return { error: 'Context failed' };
 }
 
-// Start New Chat - Click the + button at the TOP of the chat window (NOT the context/media + button)
+// Start New Chat
 async function startNewChat(cdp) {
     const EXP = `(async () => {
         try {
-            // Priority 1: Exact selector from user (data-tooltip-id="new-conversation-tooltip")
-            const exactBtn = document.querySelector('[data-tooltip-id="new-conversation-tooltip"]');
-            if (exactBtn) {
-                exactBtn.click();
-                return { success: true, method: 'data-tooltip-id' };
-            }
-
-            // Fallback: Use previous heuristics
             const allButtons = Array.from(document.querySelectorAll('button, [role="button"], a'));
-            
-            // Find all buttons with plus icons
-            const plusButtons = allButtons.filter(btn => {
-                if (btn.offsetParent === null) return false; // Skip hidden
-                const hasPlusIcon = btn.querySelector('svg.lucide-plus') || 
-                                   btn.querySelector('svg.lucide-square-plus') ||
-                                   btn.querySelector('svg[class*="plus"]');
-                return hasPlusIcon;
+            const newChatBtn = allButtons.find(btn => {
+                const txt = (btn.innerText || '').trim();
+                const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
+                return txt === '新建会话' || aria.includes('new conversation') || aria.includes('新建');
             });
-            
-            // Filter only top buttons (toolbar area)
-            const topPlusButtons = plusButtons.filter(btn => {
-                const rect = btn.getBoundingClientRect();
-                return rect.top < 200;
-            });
-
-            if (topPlusButtons.length > 0) {
-                 topPlusButtons.sort((a, b) => a.getBoundingClientRect().top - b.getBoundingClientRect().top);
-                 topPlusButtons[0].click();
-                 return { success: true, method: 'filtered_top_plus', count: topPlusButtons.length };
-            }
-            
-            // Fallback: aria-label
-             const newChatBtn = allButtons.find(btn => {
-                const ariaLabel = btn.getAttribute('aria-label')?.toLowerCase() || '';
-                const title = btn.getAttribute('title')?.toLowerCase() || '';
-                return (ariaLabel.includes('new') || title.includes('new')) && btn.offsetParent !== null;
-            });
-            
             if (newChatBtn) {
                 newChatBtn.click();
-                return { success: true, method: 'aria_label_new' };
+                return { success: true, method: 'dom_button' };
             }
-            
-            return { error: 'New chat button not found' };
+
+            // Fallback: navigate via CDP Page.navigate to root
+            return { success: true, method: 'fallback_needed' };
         } catch(e) {
             return { error: e.toString() };
         }
@@ -1421,15 +1421,15 @@ async function closeHistory(cdp) {
     return { error: 'Failed to close history panel' };
 }
 
-// Check if a chat is currently open (has cascade element)
+// Check if a chat is currently open
 async function hasChatOpen(cdp) {
     const EXP = `(() => {
-    const chatContainer = document.getElementById('conversation') || document.getElementById('chat') || document.getElementById('cascade');
-    const hasMessages = chatContainer && chatContainer.querySelectorAll('[class*="message"], [data-message]').length > 0;
+    const composer = document.querySelector('.surface-composer, .surface-composer-card, [data-testid="autoscroll-viewport"], #conversation, #chat, #cascade');
+    const editor = document.querySelector('[contenteditable="true"], [data-lexical-editor="true"], textarea');
     return {
-        hasChat: !!chatContainer,
-        hasMessages: hasMessages,
-        editorFound: !!(chatContainer && chatContainer.querySelector('[data-lexical-editor="true"]'))
+        hasChat: !!composer,
+        hasMessages: true,
+        editorFound: !!editor
     };
 })()`;
 
@@ -1450,73 +1450,71 @@ async function hasChatOpen(cdp) {
 async function getAppState(cdp) {
     const EXP = `(async () => {
     try {
-        const state = { mode: 'Unknown', model: 'Unknown' };
+        const state = {
+            mode: '极速 (Turbo)',
+            model: 'Unknown',
+            isBusy: false,
+            chatTitle: '',
+            pendingActions: []
+        };
 
-        // 1. Get Mode (Fast/Planning)
-        // Strategy: Find the clickable mode button which contains either "Fast" or "Planning"
-        // It's usually a button or div with cursor:pointer containing the mode text
-        const allEls = Array.from(document.querySelectorAll('*'));
+        // 1. Get Mode from permissions trigger
+        const modeBtn = document.querySelector('[data-testid="permissions-selector-trigger"], button[aria-label*="preset selector"]');
+        if (modeBtn) {
+            const txt = (modeBtn.innerText || '').trim();
+            if (txt) state.mode = txt;
+        }
 
-        // Find elements that are likely mode buttons
-        for (const el of allEls) {
-            if (el.children.length > 0) continue;
-            const text = (el.innerText || '').trim();
-            if (text !== 'Fast' && text !== 'Planning') continue;
+        // 2. Get Model from model selector trigger
+        const modelBtn = document.querySelector('[data-testid="model-selector-trigger"], button[aria-label*="Select model"]');
+        if (modelBtn) {
+            const txt = (modelBtn.innerText || '').trim();
+            if (txt) state.model = txt;
+        }
 
-            // Check if this or a parent is clickable (the actual mode selector)
-            let current = el;
-            for (let i = 0; i < 5; i++) {
-                if (!current) break;
-                const style = window.getComputedStyle(current);
-                if (style.cursor === 'pointer' || current.tagName === 'BUTTON') {
-                    state.mode = text;
-                    break;
+        // 3. Detect if Agent is actively generating/executing
+        const cancelBtn = document.querySelector('[data-testid="input-cancel-button"], button[aria-label*="取消"], [data-tooltip-id="input-send-button-cancel-tooltip"]');
+        state.isBusy = !!(cancelBtn && cancelBtn.offsetParent !== null);
+
+        // 4. Parse clean conversation title
+        const rawTitle = (document.title || '').trim();
+        if (rawTitle) {
+            const parts = rawTitle.split(' - ');
+            state.chatTitle = parts.length > 1 ? parts[0].trim() : rawTitle;
+        }
+
+        // 5. Detect pending approval / interactive action buttons inside chat viewport
+        const viewport = document.querySelector('[data-testid="autoscroll-viewport"]') || document.getElementById('conversation') || document.body;
+        if (viewport) {
+            const approveRegex = /^(运行|允许|总是允许|仅允许一次|允许本次对话|确认|接受|应用|run|allow|always allow|allow once|allow this conversation|confirm|accept|apply)$/i;
+            const rejectRegex = /^(拒绝|丢弃|取消|deny|reject|discard)$/i;
+            const allBtns = Array.from(viewport.querySelectorAll('button, [role="button"]'));
+            const matched = [];
+            allBtns.forEach((btn) => {
+                if (btn.offsetParent === null || btn.disabled) return;
+                const txt = (btn.innerText || '').trim().replace(/\\s+/g, ' ');
+                if (!txt || txt.length > 26) return;
+                if (approveRegex.test(txt)) {
+                    matched.push({ text: txt, kind: 'approve' });
+                } else if (rejectRegex.test(txt)) {
+                    matched.push({ text: txt, kind: 'reject' });
                 }
-                current = current.parentElement;
-            }
-            if (state.mode !== 'Unknown') break;
-        }
-
-        // Fallback: Just look for visible text
-        if (state.mode === 'Unknown') {
-            const textNodes = allEls.filter(el => el.children.length === 0 && el.innerText);
-            if (textNodes.some(el => el.innerText.trim() === 'Planning')) state.mode = 'Planning';
-            else if (textNodes.some(el => el.innerText.trim() === 'Fast')) state.mode = 'Fast';
-        }
-
-        // 2. Get Model
-        // Strategy: Look for leaf text nodes containing a known model keyword
-        const KNOWN_MODELS = ["Gemini", "Claude", "GPT"];
-        const textNodes2 = allEls.filter(el => el.children.length === 0 && el.innerText);
-        
-        // First try: find inside a clickable parent (button, cursor:pointer)
-        let modelEl = textNodes2.find(el => {
-            const txt = el.innerText.trim();
-            if (!KNOWN_MODELS.some(k => txt.includes(k))) return false;
-            // Must be in a clickable context (header/toolbar, not chat content)
-            let parent = el;
-            for (let i = 0; i < 8; i++) {
-                if (!parent) break;
-                if (parent.tagName === 'BUTTON' || window.getComputedStyle(parent).cursor === 'pointer') return true;
-                parent = parent.parentElement;
-            }
-            return false;
-        });
-        
-        // Fallback: any leaf node with a known model name
-        if (!modelEl) {
-            modelEl = textNodes2.find(el => {
-                const txt = el.innerText.trim();
-                return KNOWN_MODELS.some(k => txt.includes(k)) && txt.length < 60;
+            });
+            // Keep only the latest cluster (max 4 buttons) and compute occurrence index for exact click matching
+            const tail = matched.slice(-4);
+            state.pendingActions = tail.map(item => {
+                const sameTextBtns = allBtns.filter(b => (b.innerText || '').trim().replace(/\\s+/g, ' ').includes(item.text));
+                return {
+                    text: item.text,
+                    kind: item.kind,
+                    selector: 'button',
+                    index: Math.max(0, sameTextBtns.length - 1)
+                };
             });
         }
 
-        if (modelEl) {
-            state.model = modelEl.innerText.trim();
-        }
-
         return state;
-    } catch (e) { return { error: e.toString() }; }
+    } catch (e) { return { mode: '极速 (Turbo)', model: 'Unknown', isBusy: false, chatTitle: '', pendingActions: [], error: e.toString() }; }
 })()`;
 
     for (const ctx of cdp.contexts) {
@@ -1531,6 +1529,210 @@ async function getAppState(cdp) {
         } catch (e) { }
     }
     return { error: 'Context failed' };
+}
+
+// Get Available Models dynamically from Antigravity 2.0 dropdown
+async function getAvailableModels(cdp, forceRefresh = false) {
+    const now = Date.now();
+    if (!forceRefresh && cachedModels && (now - cachedModelsAt < 60000)) {
+        return { success: true, models: cachedModels, cached: true };
+    }
+
+    const EXP = `(async () => {
+        try {
+            const trigger = document.querySelector('[data-testid="model-selector-trigger"], button[aria-label*="Select model"]');
+            if (!trigger) return { error: 'Model selector trigger not found' };
+
+            const currentModel = (trigger.innerText || '').trim();
+            trigger.click();
+            await new Promise(r => setTimeout(r, 350));
+
+            const menu = document.querySelector('.agy-overlay[role="menu"], [role="menu"]');
+            if (!menu) return { error: 'Model menu did not open' };
+
+            const rawItems = Array.from(menu.querySelectorAll('.agy-overlay-item, [role="menuitem"]'));
+            const models = [];
+            for (const el of rawItems) {
+                const lines = (el.innerText || '').split('\\n').map(s => s.trim()).filter(Boolean);
+                if (lines.length === 0) continue;
+                const name = lines[0];
+                if (/^(查看用量|view usage|usage)$/i.test(name)) continue;
+
+                const badge = lines.slice(1).join(' · ');
+                const disabled = el.hasAttribute('data-disabled') ||
+                                 el.getAttribute('aria-disabled') === 'true' ||
+                                 /unavailable|paid pro/i.test(badge);
+                const active = currentModel.toLowerCase().includes(name.toLowerCase()) || name.toLowerCase().includes(currentModel.toLowerCase());
+                models.push({ name, badge, disabled, active });
+            }
+
+            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            return { success: true, currentModel, models };
+        } catch (err) {
+            try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); } catch (e) {}
+            return { error: err.toString() };
+        }
+    })()`;
+
+    for (const ctx of cdp.contexts) {
+        try {
+            const res = await cdp.call("Runtime.evaluate", {
+                expression: EXP,
+                returnByValue: true,
+                awaitPromise: true,
+                contextId: ctx.id
+            });
+            if (res.result?.value && res.result.value.success) {
+                cachedModels = res.result.value.models;
+                cachedModelsAt = Date.now();
+                return res.result.value;
+            }
+        } catch (e) { }
+    }
+    return { error: 'Failed to inspect models' };
+}
+
+// Parse Antigravity Usage / Quota panel text into structured groups
+function parseQuotaText(rawText) {
+    const lines = String(rawText || '').split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+    const groups = [];
+    let currentGroup = null;
+    let currentLimit = '';
+
+    for (const line of lines) {
+        if (/^(usage|用量)$/i.test(line)) continue;
+        if (/models|模型/i.test(line) && !/%/.test(line)) {
+            currentGroup = { name: line, items: [] };
+            groups.push(currentGroup);
+            currentLimit = '';
+            continue;
+        }
+        if (/limit|限制/i.test(line) && !/%/.test(line)) {
+            currentLimit = line;
+            continue;
+        }
+        const pctMatch = line.match(/(\d{1,3})\s*%/);
+        if (pctMatch) {
+            if (!currentGroup) {
+                currentGroup = { name: 'Model Quota', items: [] };
+                groups.push(currentGroup);
+            }
+            currentGroup.items.push({
+                label: currentLimit || '剩余额度',
+                percent: Math.max(0, Math.min(100, Number(pctMatch[1]))),
+                rawPercent: line,
+                resetIn: ''
+            });
+            continue;
+        }
+        const resetMatch = line.match(/^(?:resets?\s+in\s+|重置(?:时间|倒计时)?[:：\s]*)(.+)$/i);
+        if (resetMatch && currentGroup && currentGroup.items.length > 0) {
+            currentGroup.items[currentGroup.items.length - 1].resetIn = line;
+        }
+    }
+    return groups;
+}
+
+// Get Model Remaining Quota from Antigravity 2.0 "View Usage" dialog
+async function getModelQuota(cdp, forceRefresh = false) {
+    const now = Date.now();
+    if (!forceRefresh && cachedQuota && (now - cachedQuotaAt < 120000)) {
+        return { success: true, ...cachedQuota, cached: true };
+    }
+
+    const EXP = `(async () => {
+        try {
+            const findUsageBlock = () => {
+                const els = Array.from(document.querySelectorAll('div, section'));
+                return els.find(el => {
+                    const t = el.innerText || '';
+                    return t.length < 700 && /%/.test(t) && /limit|限制/i.test(t) && /Gemini|Claude|GPT/i.test(t);
+                });
+            };
+
+            let block = findUsageBlock();
+            let openedByScript = false;
+
+            if (!block) {
+                const trigger = document.querySelector('[data-testid="model-selector-trigger"], button[aria-label*="Select model"]');
+                if (!trigger) return { error: 'Model selector trigger not found' };
+                const aria = trigger.getAttribute('aria-label') || '';
+                if (trigger.disabled || /cannot be changed while the agent is running/i.test(aria)) {
+                    return { busy: true, error: 'Agent is currently running' };
+                }
+
+                trigger.click();
+                await new Promise(r => setTimeout(r, 400));
+
+                const menu = document.querySelector('.agy-overlay[role="menu"], [role="menu"]');
+                if (!menu) return { busy: true, error: 'Model menu did not open' };
+
+                const usageItem = Array.from(menu.querySelectorAll('.agy-overlay-item, [role="menuitem"], button, a'))
+                    .find(el => /view usage|查看用量|usage|quota|额度/i.test(el.innerText || ''));
+                if (!usageItem) {
+                    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                    return { error: 'View Usage entry not found' };
+                }
+
+                usageItem.click();
+                openedByScript = true;
+
+                for (let i = 0; i < 12; i++) {
+                    await new Promise(r => setTimeout(r, 150));
+                    block = findUsageBlock();
+                    if (block) break;
+                }
+            }
+
+            const rawText = block ? (block.innerText || '').trim() : '';
+
+            if (openedByScript) {
+                const closeBtn = document.querySelector('[role="dialog"] button[aria-label*="Close"], [role="dialog"] button[aria-label*="关闭"], button:has(svg.lucide-x)');
+                if (closeBtn) closeBtn.click();
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                await new Promise(r => setTimeout(r, 150));
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+            }
+
+            if (!rawText) return { error: 'Usage quota details not found' };
+            return { success: true, rawText };
+        } catch (err) {
+            try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); } catch (e) {}
+            return { error: err.toString() };
+        }
+    })()`;
+
+    let lastRes = null;
+    for (const ctx of cdp.contexts) {
+        try {
+            const res = await cdp.call("Runtime.evaluate", {
+                expression: EXP,
+                returnByValue: true,
+                awaitPromise: true,
+                contextId: ctx.id
+            });
+            const val = res.result?.value;
+            if (!val) continue;
+            lastRes = val;
+            if (val.success && val.rawText) {
+                const groups = parseQuotaText(val.rawText);
+                const payload = {
+                    groups,
+                    rawText: val.rawText,
+                    updatedAt: new Date().toISOString()
+                };
+                cachedQuota = payload;
+                cachedQuotaAt = Date.now();
+                return { success: true, ...payload, cached: false };
+            }
+            if (val.busy) break;
+        } catch (e) {}
+    }
+
+    if (cachedQuota) {
+        return { success: true, ...cachedQuota, stale: true, busy: !!lastRes?.busy };
+    }
+    return { success: false, busy: !!lastRes?.busy, error: lastRes?.error || 'Failed to inspect model quota' };
 }
 
 // Simple hash function
@@ -1577,6 +1779,12 @@ async function initCDP() {
     console.log('🔌 Connecting to CDP...');
     cdpConnection = await connectCDP(cdpInfo.url);
     console.log(`✅ Connected! Found ${cdpConnection.contexts.length} execution contexts\n`);
+    // Warm up quota cache once in background when idle so mobile sees quota immediately
+    setTimeout(() => {
+        if (cdpConnection && !cachedQuota) {
+            getModelQuota(cdpConnection, false).catch(() => {});
+        }
+    }, 1500);
 }
 
 // Background polling
@@ -1612,6 +1820,10 @@ async function startPolling(wss) {
             const snapshot = await captureSnapshot(cdpConnection);
             if (snapshot && !snapshot.error) {
                 const hash = hashString(snapshot.html);
+                const cssHash = snapshot.css ? hashString(snapshot.css) : cachedCSSHash;
+                cachedCSSHash = cssHash;
+                snapshot.cssHash = cssHash;
+                snapshot.htmlHash = hash;
 
                 // Only update if content changed
                 if (hash !== lastSnapshotHash) {
@@ -1685,7 +1897,7 @@ async function createServer() {
     AUTH_TOKEN = hashString(APP_PASSWORD + authSalt);
 
     app.use(compression());
-    app.use(express.json());
+    app.use(express.json({ limit: '15mb' }));
 
     // Use a secure session secret from .env if available
     const sessionSecret = process.env.SESSION_SECRET || 'antigravity_secret_key_1337';
@@ -1705,7 +1917,7 @@ async function createServer() {
 
     // Auth Middleware
     app.use((req, res, next) => {
-        const publicPaths = ['/login', '/login.html', '/favicon.ico'];
+        const publicPaths = ['/login', '/login.html', '/favicon.ico', '/manifest.json', '/icon.svg'];
         if (publicPaths.includes(req.path) || req.path.startsWith('/css/')) {
             return next();
         }
@@ -1762,12 +1974,31 @@ async function createServer() {
         res.json({ success: true });
     });
 
-    // Get current snapshot
+    // Get current snapshot (supports cssHash & htmlHash delta caching for ultra-fast mobile updates)
     app.get('/snapshot', (req, res) => {
         if (!lastSnapshot) {
             return res.status(503).json({ error: 'No snapshot available yet' });
         }
         res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        const clientCssHash = req.query.cssHash;
+        const clientHtmlHash = req.query.htmlHash;
+        if (clientHtmlHash && lastSnapshot.htmlHash && clientHtmlHash === lastSnapshot.htmlHash) {
+            if (!clientCssHash || clientCssHash === lastSnapshot.cssHash) {
+                return res.json({
+                    unchanged: true,
+                    htmlHash: lastSnapshot.htmlHash,
+                    cssHash: lastSnapshot.cssHash,
+                    stats: lastSnapshot.stats
+                });
+            }
+        }
+        if (clientCssHash && lastSnapshot.cssHash && clientCssHash === lastSnapshot.cssHash) {
+            return res.json({
+                ...lastSnapshot,
+                css: null,
+                cssCached: true
+            });
+        }
         res.json(lastSnapshot);
     });
 
@@ -2075,8 +2306,16 @@ async function createServer() {
         res.json(results);
     });
 
+    wss.on('error', (err) => {
+        console.warn('⚠️ WebSocket server error:', err.message);
+    });
+
     // WebSocket connection with Auth check
     wss.on('connection', (ws, req) => {
+        ws.on('error', (err) => {
+            console.warn('📱 Client WS error (handled safely):', err.message);
+        });
+
         // Parse cookies from headers
         const rawCookies = req.headers.cookie || '';
         const parsedCookies = {};
@@ -2161,8 +2400,24 @@ async function main() {
 
         // Get App State
         app.get('/app-state', async (req, res) => {
-            if (!cdpConnection) return res.json({ mode: 'Unknown', model: 'Unknown' });
+            if (!cdpConnection) return res.json({ mode: 'Unknown', model: 'Unknown', isBusy: false, chatTitle: '', pendingActions: [] });
             const result = await getAppState(cdpConnection);
+            res.json(result);
+        });
+
+        // Get Available Models dynamically
+        app.get('/models', async (req, res) => {
+            if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+            const force = req.query.refresh === '1';
+            const result = await getAvailableModels(cdpConnection, force);
+            res.json(result);
+        });
+
+        // Get Model Remaining Quota dynamically
+        app.get('/quota', async (req, res) => {
+            if (!cdpConnection) return res.status(503).json({ success: false, error: 'CDP disconnected' });
+            const force = req.query.refresh === '1';
+            const result = await getModelQuota(cdpConnection, force);
             res.json(result);
         });
 
@@ -2173,20 +2428,148 @@ async function main() {
             res.json(result);
         });
 
-        // Get Chat History
-        app.get('/chat-history', async (req, res) => {
-            if (!cdpConnection) return res.json({ error: 'CDP disconnected', chats: [] });
-            const result = await getChatHistory(cdpConnection);
-            res.json(result);
+        // Get Chat History - Directly from Antigravity Brain on disk (100% reliable)
+        app.get('/chat-history', (req, res) => {
+            try {
+                const homedir = os.homedir();
+                const brainDir = join(homedir, '.gemini', 'antigravity', 'brain');
+                if (!fs.existsSync(brainDir)) {
+                    return res.json({ success: true, chats: [] });
+                }
+
+                const folders = fs.readdirSync(brainDir, { withFileTypes: true })
+                    .filter(d => d.isDirectory() && d.name !== 'tempmediaStorage');
+
+                const nowMs = Date.now();
+                const formatTimeAgo = (ms) => {
+                    const diffSec = Math.max(0, Math.floor((nowMs - ms) / 1000));
+                    if (diffSec < 60) return '刚刚';
+                    const diffMin = Math.floor(diffSec / 60);
+                    if (diffMin < 60) return `${diffMin}分钟前`;
+                    const diffHour = Math.floor(diffMin / 60);
+                    if (diffHour < 24) return `${diffHour}小时前`;
+                    const diffDay = Math.floor(diffHour / 24);
+                    if (diffDay === 1) return '昨天';
+                    if (diffDay < 30) return `${diffDay}天前`;
+                    const d = new Date(ms);
+                    return `${d.getMonth() + 1}月${d.getDate()}日`;
+                };
+
+                const chats = [];
+                for (const f of folders) {
+                    const convId = f.name;
+                    const tPath = join(brainDir, convId, '.system_generated', 'logs', 'transcript.jsonl');
+                    let title = '';
+                    let mtime = 0;
+                    try {
+                        if (fs.existsSync(tPath)) {
+                            mtime = fs.statSync(tPath).mtimeMs;
+                        } else {
+                            mtime = fs.statSync(join(brainDir, convId)).mtimeMs;
+                        }
+                    } catch (e) {}
+
+                    if (fs.existsSync(tPath)) {
+                        try {
+                            const content = fs.readFileSync(tPath, 'utf8');
+                            const lines = content.split('\n').filter(Boolean);
+                            for (const line of lines.slice(0, 10)) {
+                                const obj = JSON.parse(line);
+                                if (obj.content && obj.type === 'USER_INPUT') {
+                                    const match = obj.content.match(/<USER_REQUEST>([\s\S]*?)<\/USER_REQUEST>/);
+                                    if (match) {
+                                        title = match[1].trim().replace(/\s+/g, ' ').substring(0, 60);
+                                        break;
+                                    }
+                                }
+                            }
+                        } catch (e) {}
+                    }
+
+                    if (!title) {
+                        title = `会话 ${convId.substring(0, 8)}`;
+                    }
+
+                    const date = new Date(mtime);
+                    const timeStr = `${date.getMonth() + 1}月${date.getDate()}日 ${date.getHours().toString().padStart(2, '0')}:${date.getMinutes().toString().padStart(2, '0')}`;
+
+                    chats.push({
+                        id: convId,
+                        title: title,
+                        time: mtime,
+                        timeStr: timeStr,
+                        timeAgo: formatTimeAgo(mtime)
+                    });
+                }
+
+                chats.sort((a, b) => b.time - a.time);
+                res.json({ success: true, chats: chats.slice(0, 30) });
+            } catch (err) {
+                console.error('chat-history error:', err);
+                res.json({ error: '读取历史会话失败: ' + err.message, chats: [] });
+            }
         });
 
-        // Select a Chat
+        // Helper to build dynamic Antigravity 2.0 conversation URL from live page origin
+        async function buildConversationUrl(cdp, convId) {
+            let origin = '';
+            let projectQuery = '';
+            for (const ctx of (cdp?.contexts || [])) {
+                try {
+                    const r = await cdp.call('Runtime.evaluate', {
+                        expression: 'JSON.stringify({ origin: location.origin, search: location.search })',
+                        returnByValue: true,
+                        contextId: ctx.id
+                    });
+                    if (r.result?.value) {
+                        const info = JSON.parse(r.result.value);
+                        if (info.origin && info.origin.startsWith('http')) origin = info.origin;
+                        const params = new URLSearchParams(info.search || '');
+                        if (params.get('project')) projectQuery = 'project=' + encodeURIComponent(params.get('project'));
+                        break;
+                    }
+                } catch (e) {}
+            }
+            if (!origin) return null;
+            return projectQuery ? `${origin}/c/${convId}?${projectQuery}` : `${origin}/c/${convId}`;
+        }
+
+        // Select a Chat - Navigates Antigravity 2.0 to that conversation
         app.post('/select-chat', async (req, res) => {
-            const { title } = req.body;
-            if (!title) return res.status(400).json({ error: 'Chat title required' });
-            if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
-            const result = await selectChat(cdpConnection, title);
-            res.json(result);
+            const { title, id } = req.body;
+            let convId = id || title;
+            if (!convId) return res.status(400).json({ error: 'Chat id required' });
+            
+            try {
+                const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+                if (!uuidRegex.test(convId)) {
+                    const homedir = os.homedir();
+                    const brainDir = join(homedir, '.gemini', 'antigravity', 'brain');
+                    const folders = fs.readdirSync(brainDir, { withFileTypes: true }).filter(d => d.isDirectory() && d.name !== 'tempmediaStorage');
+                    for (const f of folders) {
+                        const tPath = join(brainDir, f.name, '.system_generated', 'logs', 'transcript.jsonl');
+                        if (fs.existsSync(tPath)) {
+                            const content = fs.readFileSync(tPath, 'utf8');
+                            if (content.includes(title)) {
+                                convId = f.name;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (cdpConnection) {
+                    console.log(`[SELECT_CHAT] Navigating to conversation: ${convId}`);
+                    const targetUrl = await buildConversationUrl(cdpConnection, convId);
+                    if (!targetUrl) return res.status(503).json({ error: 'Unable to determine active Antigravity page origin' });
+                    cdpConnection.call("Page.navigate", { url: targetUrl }).catch(() => {});
+                    return res.json({ success: true, id: convId });
+                }
+                res.status(503).json({ error: 'CDP disconnected' });
+            } catch (err) {
+                console.error('select-chat error:', err);
+                res.json({ error: err.message });
+            }
         });
 
         // Close Chat History
@@ -2201,6 +2584,250 @@ async function main() {
             if (!cdpConnection) return res.json({ hasChat: false, hasMessages: false, editorFound: false });
             const result = await hasChatOpen(cdpConnection);
             res.json(result);
+        });
+
+        // Handle conversation links: /c/:conversationId or /c/*
+        app.get('/c/:conversationId?', async (req, res) => {
+            const conversationId = req.params.conversationId || req.url.split('/c/')[1]?.split('?')[0];
+            try {
+                if (cdpConnection && conversationId) {
+                    console.log(`[NAV] Switching conversation to: ${conversationId}`);
+                    const targetUrl = await buildConversationUrl(cdpConnection, conversationId);
+                    if (targetUrl) {
+                        cdpConnection.call("Page.navigate", {
+                            url: targetUrl
+                        }).catch(() => {});
+                    }
+                }
+            } catch (err) {
+                console.error('[NAV] Error navigating to conversation:', err);
+            }
+            res.redirect('/');
+        });
+
+        // List all active Antigravity CDP window targets
+        app.get('/targets', async (req, res) => {
+            try {
+                const targets = await listCDPTargets();
+                res.json({ success: true, targets });
+            } catch (err) {
+                res.status(500).json({ success: false, error: err.message, targets: [] });
+            }
+        });
+
+        // Switch active Antigravity CDP window target
+        app.post('/switch-target', async (req, res) => {
+            const { wsUrl } = req.body || {};
+            if (!wsUrl) return res.status(400).json({ success: false, error: 'wsUrl required' });
+            try {
+                await switchCDPTarget(wsUrl);
+                res.json({ success: true });
+            } catch (err) {
+                res.status(400).json({ success: false, error: err.message });
+            }
+        });
+
+        // Upload & attach image to Antigravity composer via CDP DOM.setFileInputFiles
+        app.post('/upload-image', async (req, res) => {
+            if (!cdpConnection) return res.status(503).json({ success: false, error: 'CDP not connected' });
+            const { dataBase64, mimeType, fileName, caption } = req.body || {};
+            if (!dataBase64 || typeof dataBase64 !== 'string') {
+                return res.status(400).json({ success: false, error: 'Image data required' });
+            }
+
+            const extMap = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
+            const cleanMime = String(mimeType || 'image/png').toLowerCase().split(';')[0].trim();
+            const ext = extMap[cleanMime] || '.png';
+            const cleanBase64 = dataBase64.replace(/^data:image\/[a-z0-9+.-]+;base64,/i, '');
+            const buf = Buffer.from(cleanBase64, 'base64');
+            if (!buf.length || buf.length > 12 * 1024 * 1024) {
+                return res.status(400).json({ success: false, error: 'Invalid or oversized image (max 12MB)' });
+            }
+
+            const safeBase = String(fileName || 'mobile_image').replace(/[^a-zA-Z0-9._-]/g, '_').replace(/\.[^.]+$/, '') || 'mobile_image';
+            const tmpFile = join(os.tmpdir(), `ag_upload_${Date.now()}_${safeBase}${ext}`);
+            fs.writeFileSync(tmpFile, buf);
+            setTimeout(() => { try { fs.unlinkSync(tmpFile); } catch (e) {} }, 120000);
+
+            try {
+                // Reject early if desktop agent is currently generating (avoids leaving stray attachments)
+                for (const ctx of cdpConnection.contexts) {
+                    const busyRes = await cdpConnection.call('Runtime.evaluate', {
+                        contextId: ctx.id,
+                        returnByValue: true,
+                        expression: `!!(() => {
+                            const c = document.querySelector('[data-testid="input-cancel-button"], button[aria-label*="取消"], [data-tooltip-id="input-send-button-cancel-tooltip"]');
+                            return c && c.offsetParent !== null;
+                        })()`
+                    }).catch(() => null);
+                    if (busyRes?.result?.value === true) {
+                        try { fs.unlinkSync(tmpFile); } catch (e) {}
+                        return res.json({ success: false, details: { reason: 'busy' }, attached: false });
+                    }
+                }
+
+                await cdpConnection.call('DOM.enable', {});
+                const doc = await cdpConnection.call('DOM.getDocument', { depth: -1 });
+                let fileNode = await cdpConnection.call('DOM.querySelector', {
+                    nodeId: doc.root.nodeId,
+                    selector: 'input[type="file"]'
+                }).catch(() => ({ nodeId: 0 }));
+
+                if (!fileNode?.nodeId) {
+                    try { fs.unlinkSync(tmpFile); } catch (e) {}
+                    return res.status(404).json({ success: false, error: 'Desktop file input not found' });
+                }
+
+                await cdpConnection.call('DOM.setFileInputFiles', {
+                    nodeId: fileNode.nodeId,
+                    files: [tmpFile]
+                });
+
+                await new Promise(r => setTimeout(r, 450));
+
+                if (caption && String(caption).trim()) {
+                    const sendRes = await injectMessage(cdpConnection, String(caption).trim());
+                    if (sendRes.ok === false) {
+                        await cdpConnection.call('DOM.setFileInputFiles', { nodeId: fileNode.nodeId, files: [] }).catch(() => {});
+                    }
+                    return res.json({ success: sendRes.ok !== false, details: sendRes, attached: sendRes.ok !== false });
+                }
+
+                // Trigger send if user sent image without text caption
+                let sent = false;
+                for (const ctx of cdpConnection.contexts) {
+                    const clickRes = await cdpConnection.call('Runtime.evaluate', {
+                        contextId: ctx.id,
+                        returnByValue: true,
+                        awaitPromise: true,
+                        expression: `(async () => {
+                            const cancel = document.querySelector('[data-testid="input-cancel-button"], button[aria-label*="取消"], [data-tooltip-id="input-send-button-cancel-tooltip"]');
+                            if (cancel && cancel.offsetParent !== null) return { ok: false, reason: 'busy' };
+                            const btn = document.querySelector('[data-testid="send-button"]') || document.querySelector('button[aria-label*="发送"]');
+                            if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true') {
+                                btn.click();
+                                return { ok: true };
+                            }
+                            return { ok: false };
+                        })()`
+                    }).catch(() => null);
+                    if (clickRes?.result?.value?.ok) {
+                        sent = true;
+                        break;
+                    }
+                    if (clickRes?.result?.value?.reason === 'busy') {
+                        await cdpConnection.call('DOM.setFileInputFiles', { nodeId: fileNode.nodeId, files: [] }).catch(() => {});
+                        return res.json({ success: false, details: { reason: 'busy' }, attached: false });
+                    }
+                }
+                return res.json({ success: true, attached: true, autoSent: sent });
+            } catch (err) {
+                return res.status(500).json({ success: false, error: err.message });
+            }
+        });
+
+        // Resolve active Git repository root for workspace diff inspection
+        async function resolveGitRoot() {
+            const candidates = [
+                process.env.WORKSPACE_PATH,
+                process.cwd(),
+                join(__dirname, '..'),
+                __dirname
+            ].filter(Boolean);
+
+            for (const dir of candidates) {
+                if (!fs.existsSync(dir)) continue;
+                try {
+                    const { stdout } = await execFileAsync('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { timeout: 3000 });
+                    const root = stdout.trim();
+                    if (root && fs.existsSync(root)) return root;
+                } catch (e) {}
+            }
+            return null;
+        }
+
+        // Workspace Git status summary
+        app.get('/git-status', async (req, res) => {
+            try {
+                const gitRoot = await resolveGitRoot();
+                if (!gitRoot) {
+                    return res.json({ success: true, isGitRepo: false, branch: '', files: [] });
+                }
+
+                const [{ stdout: branchOut }, { stdout: statusOut }, { stdout: numstatOut }] = await Promise.all([
+                    execFileAsync('git', ['-C', gitRoot, 'branch', '--show-current'], { timeout: 3000 }).catch(() => ({ stdout: '' })),
+                    execFileAsync('git', ['-C', gitRoot, 'status', '--porcelain=v1', '-uall'], { timeout: 5000 }),
+                    execFileAsync('git', ['-C', gitRoot, 'diff', '--numstat', 'HEAD'], { timeout: 5000 }).catch(() => ({ stdout: '' }))
+                ]);
+
+                const statsMap = new Map();
+                numstatOut.split(/\r?\n/).filter(Boolean).forEach(line => {
+                    const [ins, del, ...rest] = line.split('\t');
+                    const filePath = rest.join('\t');
+                    if (filePath) statsMap.set(filePath, { ins: ins === '-' ? 0 : Number(ins) || 0, del: del === '-' ? 0 : Number(del) || 0 });
+                });
+
+                const files = statusOut.split(/\r?\n/).filter(Boolean).map(line => {
+                    const code = line.slice(0, 2);
+                    let filePath = line.slice(3).trim();
+                    if (filePath.includes(' -> ')) filePath = filePath.split(' -> ').pop().trim();
+                    filePath = filePath.replace(/^"|"$/g, '');
+                    const stat = statsMap.get(filePath) || { ins: 0, del: 0 };
+                    return {
+                        status: code.trim() || 'M',
+                        path: filePath,
+                        insertions: stat.ins,
+                        deletions: stat.del
+                    };
+                }).slice(0, 80);
+
+                res.json({
+                    success: true,
+                    isGitRepo: true,
+                    rootName: gitRoot.split(/[\\/]/).pop(),
+                    branch: branchOut.trim() || 'HEAD',
+                    files
+                });
+            } catch (err) {
+                res.status(500).json({ success: false, error: err.message, files: [] });
+            }
+        });
+
+        // Workspace single-file Git diff viewer
+        app.get('/git-diff', async (req, res) => {
+            const relFile = String(req.query.file || '').trim();
+            if (!relFile || relFile.includes('..') || relFile.startsWith('/') || /^[a-zA-Z]:/.test(relFile)) {
+                return res.status(400).json({ success: false, error: 'Invalid file path' });
+            }
+            try {
+                const gitRoot = await resolveGitRoot();
+                if (!gitRoot) return res.status(404).json({ success: false, error: 'No git repository found' });
+
+                const { stdout: statusOut } = await execFileAsync('git', ['-C', gitRoot, 'status', '--porcelain=v1', '--', relFile], { timeout: 3000 });
+                if (!statusOut.trim()) {
+                    return res.status(404).json({ success: false, error: 'File has no uncommitted changes' });
+                }
+
+                let diffText = '';
+                if (statusOut.startsWith('??')) {
+                    const absPath = join(gitRoot, relFile);
+                    const content = fs.readFileSync(absPath, 'utf8').split(/\r?\n/).slice(0, 250);
+                    diffText = `--- /dev/null\n+++ b/${relFile}\n@@ -0,0 +1,${content.length} @@\n` + content.map(l => '+' + l).join('\n');
+                } else {
+                    const { stdout } = await execFileAsync('git', ['-C', gitRoot, 'diff', 'HEAD', '--', relFile], { timeout: 5000, maxBuffer: 1024 * 1024 }).catch(async () => {
+                        return execFileAsync('git', ['-C', gitRoot, 'diff', '--', relFile], { timeout: 5000, maxBuffer: 1024 * 1024 });
+                    });
+                    diffText = stdout || '(二进制文件或无文本差异)';
+                }
+
+                if (diffText.length > 80000) {
+                    diffText = diffText.slice(0, 80000) + '\n\n... (内容过长已截断显示)';
+                }
+
+                res.json({ success: true, file: relFile, diff: diffText });
+            } catch (err) {
+                res.status(500).json({ success: false, error: err.message });
+            }
         });
 
         // Kill any existing process on the port before starting
@@ -2240,5 +2867,13 @@ async function main() {
         process.exit(1);
     }
 }
+
+process.on('uncaughtException', (err) => {
+    console.warn('⚠️ Uncaught exception (prevented server crash):', err.message);
+});
+
+process.on('unhandledRejection', (reason) => {
+    console.warn('⚠️ Unhandled rejection:', reason?.message || reason);
+});
 
 main();

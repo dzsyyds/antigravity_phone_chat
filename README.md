@@ -16,7 +16,45 @@
 
 ![Antigravity Phone Connect](./assets/global_access_hero_2.png)
 
-**Note:** This project is a refined fork/extension based on the original [Antigravity Shit-Chat](https://github.com/gherghett/Antigravity-Shit-Chat) by gherghett.
+**Note:** This enhanced edition builds upon [krishnakanthb13/antigravity_phone_chat](https://github.com/krishnakanthb13/antigravity_phone_chat) (originally forked from [gherghett/Antigravity-Shit-Chat](https://github.com/gherghett/Antigravity-Shit-Chat)) under **GNU GPL v3**, adding full **Antigravity 2.0** support, Android mobile stability & keyboard ergonomics, multi-window switching, mobile image upload, workspace Git Diff viewer, and completion alerts.
+
+---
+
+## ✨ 增强版核心升级 (Enhanced Features)
+
+- **⚡ Antigravity 2.0 全面适配**:
+  - 支持 `[data-testid="autoscroll-viewport"]`、`size-container` / `mask-image` 中和、`:root` CSS 变量动态提取；
+  - 兼容 Lexical 编辑器 `[data-testid="send-button"]` 发送与原生 CDP 输入兜底、动态多端口会话跳转。
+- **📱 深度安卓移动端体验与防闪退优化**:
+  - **增量 DOM Patch + `htmlHash` 差异缓存**: 未变化的对话节点与图片保持复用，不再整页重建；未变更时 `/snapshot` 仅返回约百字节；
+  - **无模糊合成层开销**: 移除常驻工具栏 `backdrop-filter`，避免低/中端安卓设备 GPU OOM 闪退；
+  - **防黑屏键盘贴底 (`interactive-widget=resizes-content` + `visualViewport` 双重锁定)**: 输入法弹出不顶飞页面，支持 `⏎ 回车:发送/换行` 切换、中文 IME 联想防误发、`／` `/` `＠` `@` 快捷插入、轻点聊天空白处收起键盘。
+- **📊 模型剩余额度实时查看 (`GET /quota`)**:
+  - 手机端一键读取 Antigravity 的 `View Usage` 用量数据（如 Gemini / Claude & GPT 的 5 小时与每周剩余百分比及重置倒计时），带可视化进度条与手动刷新。
+- **🪟 多窗口切换 (`GET /targets` · `POST /switch-target`)**:
+  - 在手机端一键枚举并切换电脑上打开的多个 Antigravity 项目窗口。
+- **📷 手机端拍照 / 截图直接发送 (`POST /upload-image`)**:
+  - 手机选图后前端 Canvas 自动压缩并预览，通过 CDP `DOM.setFileInputFiles` 直接注入桌面端输入框发送（可附带文字说明）。
+- **📂 工作区 Git 改动与红绿 Diff 查看器 (`GET /git-status` · `GET /git-diff`)**:
+  - 顶部状态栏实时显示改动文件数，手机端即可查看分支状态与逐行红绿 `+ / -` Diff。
+- **🔔 任务完成与待审批提醒**:
+  - 支持开启提醒开关：当 AI 从“执行中”变为完成，或桌面端弹出“运行/允许/确认”待审批操作时，自动触发震动、提示音与通知栏提醒。
+
+---
+
+## 🌐 国内网络 Cpolar + Clash TUN 避坑指南 (China Remote Access)
+
+如果电脑同时开启 **Clash Verge TUN 模式** 与 **cpolar**（如 `cpolar http 3000 -region cn_top`）：
+1. Clash 代理模式建议保持在 **`规则 (Rule)`**（而非全局 `Global`），并确保代理组选择了延迟正常的可用节点；
+2. 将 `cpolar.exe`、`.cpolar.cn/.com/.top`、服务端 IP 与 `4443` 端口加入 `DIRECT` 直连规则；
+3. 启动 `cpolar` 前清空终端代理环境变量并设置 `NO_PROXY=*`：
+   ```bat
+   set HTTP_PROXY=
+   set HTTPS_PROXY=
+   set ALL_PROXY=
+   set NO_PROXY=*
+   cpolar.exe http 3000 -region cn_top
+   ```
 
 ---
 

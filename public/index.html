@@ -1,180 +1,279 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Antigravity Phone Connect</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link
-        href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap"
-        rel="stylesheet">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+    <meta name="theme-color" content="#08080a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <title>Antigravity 掌上控制台</title>
+    <link rel="manifest" href="/manifest.json">
+    <link rel="icon" type="image/svg+xml" href="/icon.svg">
     <link rel="stylesheet" href="css/style.css">
     <!-- Security: Content Security Policy -->
     <meta http-equiv="Content-Security-Policy"
-        content="default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self';">
+        content="default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'unsafe-inline';">
 </head>
 
 <body>
-    <!-- Header -->
+    <!-- 顶部 Toast 灵动通知 -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <!-- 顶部状态导航栏 (OLED Glassmorphism) -->
     <header class="header">
-        <h1>
-            <span>Antigravity Phone Connect</span>
-        </h1>
+        <div class="header-left">
+            <div class="brand-logo" id="brandLogo">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/>
+                </svg>
+            </div>
+            <div class="brand-title">
+                <div class="brand-row">
+                    <span class="brand-name">Antigravity</span>
+                    <div class="status-badge" id="statusBadge">
+                        <div class="status-dot disconnected" id="statusDot"></div>
+                        <span id="statusText">连接中</span>
+                    </div>
+                </div>
+                <div class="active-chat-title" id="chatTitleText">正在同步会话...</div>
+            </div>
+        </div>
 
         <div class="header-controls">
-            <button class="new-chat-btn" id="newChatBtn" aria-label="New Chat" title="New Chat (Ctrl+Shift+L)">
-                <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
+            <button class="icon-action-btn primary-icon-btn" id="newChatBtn" aria-label="新建会话" title="新建会话">
+                <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" width="16" height="16" stroke="currentColor" fill="none" stroke-width="2.2">
                     <line x1="12" y1="5" x2="12" y2="19"></line>
                     <line x1="5" y1="12" x2="19" y2="12"></line>
                 </svg>
+                <span>新对话</span>
             </button>
-            <button class="history-btn" id="historyBtn" aria-label="Chat History" title="Past Conversations">
-                <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
+            <button class="icon-action-btn" id="historyBtn" aria-label="历史会话" title="历史记录">
+                <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" width="17" height="17" stroke="currentColor" fill="none" stroke-width="2">
                     <circle cx="12" cy="12" r="10"></circle>
                     <polyline points="12 6 12 12 16 14"></polyline>
                 </svg>
             </button>
-            <button class="stop-btn" id="stopBtn" aria-label="STOP">
-                <span>STOP</span>
+            <button class="stop-btn" id="stopBtn" aria-label="停止执行" title="终止当前生成">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor">
+                    <rect x="5" y="5" width="14" height="14" rx="2.5"></rect>
+                </svg>
+                <span>停止</span>
             </button>
-            <button class="refresh-btn" id="refreshBtn" aria-label="Refresh">
-                <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round">
+            <button class="icon-action-btn" id="refreshBtn" aria-label="刷新快照" title="强制刷新画面">
+                <svg viewBox="0 0 24 24" stroke-linecap="round" stroke-linejoin="round" width="17" height="17" stroke="currentColor" fill="none" stroke-width="2">
                     <path d="M23 4v6h-6"></path>
                     <path d="M1 20v-6h6"></path>
                     <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>
                 </svg>
             </button>
-            <div class="status-badge">
-                <div class="status-dot disconnected" id="statusDot"></div>
-                <span id="statusText">Connecting...</span>
-            </div>
         </div>
     </header>
 
-    <!-- Settings Bar -->
+    <!-- 设置与状态胶囊栏 -->
     <div class="settings-bar">
-        <div class="setting-chip" id="modeBtn">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <button class="setting-chip quota-chip" id="quotaBtn" title="查看当前剩余模型额度">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                <path d="M12 20V10"></path>
+                <path d="M18 20V4"></path>
+                <path d="M6 20v-4"></path>
+            </svg>
+            <span id="quotaText">额度读取中...</span>
+        </button>
+        <button class="setting-chip" id="modeBtn" title="切换运行模式">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
                 <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" />
             </svg>
-            <span id="modeText">Fast</span>
-        </div>
-        <div class="setting-chip" id="modelBtn">
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <circle cx="12" cy="12" r="10" />
-                <path d="M12 16v-4" />
-                <path d="M12 8h.01" />
+            <span id="modeText">极速 (Turbo)</span>
+            <svg class="chevron-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <polyline points="6 9 12 15 18 9"></polyline>
             </svg>
-            <span id="modelText">Select Model</span>
-        </div>
-        <div class="setting-chip" id="syncStats" style="cursor: default; border: none; background: transparent;">
-            <span id="statsText" style="font-size: 10px; opacity: 0.6;">Syncing...</span>
-        </div>
-        <div class="setting-chip" id="supportBtn"
-            style="cursor: pointer; border: none; background: transparent; padding-left: 0; padding-right: 0;"
-            aria-label="Support">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2"
-                style="fill: #ef4444; filter: drop-shadow(0 0 8px var(--accent)); transition: all 0.3s; margin-left: 4px;">
-                <path
-                    d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z">
-                </path>
+        </button>
+        <button class="setting-chip" id="modelBtn" title="切换模型">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                <path d="M12 2a4 4 0 0 1 4 4v1h1a3 3 0 0 1 3 3v2a3 3 0 0 1-3 3h-1v1a4 4 0 0 1-8 0v-1H7a3 3 0 0 1-3-3v-2a3 3 0 0 1 3-3h1V6a4 4 0 0 1 4-4z"/>
             </svg>
+            <span id="modelText">检测模型中...</span>
+            <svg class="chevron-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+        </button>
+        <button class="setting-chip" id="windowBtn" title="切换桌面工作区窗口">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                <rect x="3" y="4" width="18" height="14" rx="2"></rect>
+                <line x1="3" y1="9" x2="21" y2="9"></line>
+            </svg>
+            <span id="windowText">窗口</span>
+            <svg class="chevron-icon" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                <polyline points="6 9 12 15 18 9"></polyline>
+            </svg>
+        </button>
+        <button class="setting-chip" id="gitDiffBtn" title="查看工作区 Git 代码改动">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                <circle cx="18" cy="18" r="3"></circle>
+                <circle cx="6" cy="6" r="3"></circle>
+                <path d="M13 6h3a2 2 0 0 1 2 2v7"></path>
+                <line x1="6" y1="9" x2="6" y2="21"></line>
+            </svg>
+            <span id="gitDiffText">改动</span>
+        </button>
+        <button class="setting-chip" id="notifyBtn" title="开启任务完成与审批提醒">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2">
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+                <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+            </svg>
+            <span id="notifyText">提醒:关</span>
+        </button>
+        <div class="setting-chip sync-stats" id="syncStats">
+            <span id="statsText">流式同步</span>
         </div>
+        <div style="display:none;" id="supportBtn"></div>
     </div>
 
-    <!-- SSL Banner (shown when running HTTP) -->
+    <!-- SSL 提示横幅 (仅 HTTP 时展示) -->
     <div class="ssl-banner" id="sslBanner" style="display: none;">
-        <span>⚠️ Not Secure - Running on HTTP</span>
-        <button id="enableHttpsBtn">Enable HTTPS</button>
+        <span>⚠️ 正在使用明文 HTTP 传输</span>
+        <button id="enableHttpsBtn">启用 HTTPS</button>
         <button class="dismiss-btn">×</button>
     </div>
 
-    <!-- Chat Container -->
+    <!-- 主会话滚动容器 -->
     <div class="chat-container" id="chatContainer">
         <div class="chat-content" id="chatContent">
             <div class="loading-state">
                 <div class="loading-spinner"></div>
-                <p>Waiting for snapshot...</p>
+                <p>正在同步电脑端 Antigravity 会话...</p>
+                <span class="sub-tip">请确保电脑端已打开对话窗口</span>
             </div>
         </div>
     </div>
 
-    <!-- Scroll to Bottom FAB -->
-    <button class="fab" id="scrollToBottom" aria-label="Scroll to bottom">
-        <svg viewBox="0 0 24 24" fill="none">
+    <!-- 回到底部悬浮按钮 -->
+    <button class="fab" id="scrollToBottom" aria-label="滚动至底部">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
             <path d="M12 5v14M19 12l-7 7-7-7" stroke-linecap="round" stroke-linejoin="round" />
         </svg>
     </button>
 
-    <!-- Quick Actions -->
-    <div class="quick-actions">
-        <div class="action-chip">Continue</div>
-        <div class="action-chip">Explain Code</div>
-        <div class="action-chip">Fix Bugs</div>
-        <div class="action-chip">Create Docs</div>
+    <!-- 待审批快捷操作浮条 (智能探测桌面端确认按钮) -->
+    <div class="pending-actions-bar" id="pendingActionsBar" style="display: none;">
+        <div class="pending-label">
+            <span class="pending-pulse"></span>
+            <span>等待远程确认</span>
+        </div>
+        <div class="pending-btns" id="pendingActionsBtns"></div>
     </div>
 
-    <!-- Input Section -->
-    <div class="input-section">
-        <div class="input-wrapper">
-            <textarea id="messageInput" placeholder="Message..." rows="1"></textarea>
+    <!-- 底部常驻交互区域 (触控优化) -->
+    <div class="bottom-panel" id="bottomPanel">
+        <!-- 快捷指令胶囊滑动栏 -->
+        <div class="quick-actions" id="quickActionsBar">
+            <button class="action-chip enter-mode-chip" id="enterModeBtn" type="button" title="切换软键盘回车行为">⏎ 回车:发送</button>
+            <button class="action-chip insert-chip" data-insert="/" type="button">／ 斜杠命令</button>
+            <button class="action-chip insert-chip" data-insert="@" type="button">＠ 引用文件</button>
+            <button class="action-chip" data-action="请继续执行下一步任务" type="button">🚀 继续执行</button>
+            <button class="action-chip" data-action="请分析并修复刚才的报错" type="button">🔧 修复报错</button>
+            <button class="action-chip" data-action="请总结当前完成情况与后续计划" type="button">📊 总结进度</button>
+            <button class="action-chip" data-action="请运行测试并验证当前修改是否全部通过" type="button">✅ 运行测试</button>
+            <button class="action-chip" data-action="请详细解释当前代码的实现原理" type="button">📖 解释代码</button>
+            <button class="action-chip" data-action="请审查代码并给出性能或结构优化建议" type="button">💡 优化建议</button>
+            <button class="action-chip" data-action="请撤销上一步操作并回滚修改" type="button">↩️ 撤回上步</button>
+        </div>
 
+        <!-- 图片待发送预览条 -->
+        <div class="attachment-preview" id="attachmentPreview" style="display: none;">
+            <img id="attachmentThumb" alt="待发送图片">
+            <div class="attachment-meta">
+                <span id="attachmentName">图片附件</span>
+                <small id="attachmentSize"></small>
+            </div>
+            <button class="attachment-remove-btn" id="removeAttachmentBtn" type="button" aria-label="移除图片">×</button>
+        </div>
 
-
-            <button class="send-btn" id="sendBtn" aria-label="Send">
-                <svg viewBox="0 0 24 24">
-                    <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z"
-                        style="fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round;" />
-                </svg>
-            </button>
+        <!-- 悬浮输入框 -->
+        <div class="input-section">
+            <div class="input-wrapper">
+                <input type="file" id="imageFileInput" accept="image/*" hidden>
+                <button class="attach-btn" id="attachImgBtn" type="button" aria-label="发送图片" title="上传手机图片或截图">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="3" y="3" width="18" height="18" rx="3" ry="3"></rect>
+                        <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                        <polyline points="21 15 16 10 5 21"></polyline>
+                    </svg>
+                </button>
+                <textarea id="messageInput" placeholder="给 Antigravity 发消息... (回车发送)" rows="1" enterkeyhint="send" autocomplete="off" autocapitalize="sentences" spellcheck="false"></textarea>
+                <button class="clear-input-btn" id="clearInputBtn" type="button" aria-label="清空输入" title="清空" style="display: none;">
+                    <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
+                <button class="send-btn" id="sendBtn" type="button" aria-label="发送指令" title="发送">
+                    <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="22" y1="2" x2="11" y2="13"></line>
+                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                    </svg>
+                </button>
+            </div>
         </div>
     </div>
 
-    <!-- Modals -->
+    <!-- 全屏图片预览弹窗 -->
+    <div class="image-modal-overlay" id="imageModalOverlay">
+        <button class="image-modal-close" id="imageModalClose" type="button" aria-label="关闭图片">×</button>
+        <img id="imageModalImg" alt="预览图片">
+    </div>
+
+    <!-- 模态弹窗 (模式/模型切换) -->
     <div class="modal-overlay" id="modalOverlay">
         <div class="modal-panel" id="modalPanel">
-            <div class="modal-title" id="modalTitle">Select Option</div>
+            <div class="modal-handle"></div>
+            <div class="modal-title" id="modalTitle">选择配置项</div>
             <div id="modalList"></div>
-            <div style="margin-top:20px; text-align:center;">
-                <button id="closeModalBtn"
-                    style="background:transparent; border:none; color:var(--text-muted); padding:10px;">Cancel</button>
+            <div class="modal-footer">
+                <button id="closeModalBtn" class="modal-cancel-btn">取消</button>
             </div>
         </div>
     </div>
 
-    <!-- Support Modal -->
-    <div class="modal-overlay" id="supportOverlay">
-        <div class="modal-panel" style="text-align: center; padding: 30px 20px;">
-            <div class="modal-title" style="margin-bottom: 10px; font-size: 18px;">Support the Developer 💖</div>
-            <p style="color: var(--text-muted); margin-bottom: 24px; font-size: 14px; line-height: 1.5;">If you find
-                <b>Antigravity Phone Connect</b> useful, <br>please consider supporting the Project and the Developer!
-            </p>
-            <a href="https://krishnakanthb13.github.io/S/PLPm.html" target="_blank"
-                style="display: inline-block; background: var(--accent-gradient); color: white; padding: 12px 28px; border-radius: 12px; font-size: 15px; font-weight: 600; text-decoration: none; box-shadow: 0 4px 12px var(--accent-glow); margin-bottom: 20px;">Support</a>
-            <div>
-                <button id="closeSupportBtn"
-                    style="background:transparent; border:none; color:var(--text-muted); padding:10px; cursor: pointer; font-size: 14px;">Maybe
-                    Later</button>
+    <!-- 全屏代码阅读器弹窗 -->
+    <div class="code-modal-overlay" id="codeModalOverlay">
+        <div class="code-modal-header">
+            <span id="codeModalTitle">代码全屏预览</span>
+            <div class="code-modal-actions">
+                <button id="codeModalCopyBtn" class="code-modal-btn primary">复制全部</button>
+                <button id="codeModalCloseBtn" class="code-modal-btn">关闭</button>
             </div>
         </div>
+        <pre class="code-modal-body"><code id="codeModalContent"></code></pre>
     </div>
 
-    <!-- History Layer (Full Screen) -->
+    <div style="display:none;" id="supportOverlay">
+        <button id="closeSupportBtn"></button>
+    </div>
+
+    <!-- 历史会话全屏抽屉 -->
     <div class="history-layer" id="historyLayer">
         <div class="history-header">
-            <button class="icon-btn" aria-label="Back">
-                <svg viewBox="0 0 24 24" width="24" height="24">
-                    <path d="M19 12H5M12 19l-7-7 7-7" stroke="currentColor" stroke-width="2" stroke-linecap="round"
-                        stroke-linejoin="round" />
+            <button class="icon-btn" aria-label="返回">
+                <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M19 12H5M12 19l-7-7 7-7" />
                 </svg>
             </button>
-            <h2>Conversations</h2>
-            <div style="width: 24px;"></div> <!-- Spacer -->
+            <h2>历史对话会话</h2>
+            <span class="history-count-badge" id="historyCountBadge"></span>
+        </div>
+        <div class="history-search-wrap">
+            <div class="history-search-box">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                <input type="search" id="historySearchInput" placeholder="搜索对话标题或关键词...">
+            </div>
         </div>
         <div class="history-content" id="historyList">
-            <!-- Items injected here -->
+            <!-- 动态注入会话卡片 -->
         </div>
     </div>
 
