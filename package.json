@@ -2,7 +2,7 @@
     "name": "ag-mobile-monitor",
     "version": "0.4.0",
     "type": "module",
-    "description": "Mobile web interface for monitoring and controlling Antigravity 2.0 sessions with real-time quota, Git diff, image upload, and Android keyboard stability",
+    "description": "Antigravity 2.0 手机端远程控制台（全中文界面）：顶部模型剩余额度直显、多窗口切换、手机传图、Git Diff 审阅、安卓防闪退与软键盘适配",
     "bin": {
         "antigravity-phone-chat": "./server.js"
     },
@@ -18,7 +18,7 @@
         "express": "^4.18.2",
         "ws": "^8.18.0"
     },
-    "author": "Krishna Kanth B (krishnakanthb13)",
+    "author": "dzsyyds (基于 GPL-3.0 开源项目 krishnakanthb13/antigravity_phone_chat 汉化与深度重构)",
     "license": "GPL-3.0-only",
     "engines": {
         "node": ">=16.0.0"

@@ -1655,23 +1655,23 @@ async function getModelQuota(cdp, forceRefresh = false) {
 
             if (!block) {
                 const trigger = document.querySelector('[data-testid="model-selector-trigger"], button[aria-label*="Select model"]');
-                if (!trigger) return { error: 'Model selector trigger not found' };
+                if (!trigger) return { error: '未找到桌面端模型选择按钮' };
                 const aria = trigger.getAttribute('aria-label') || '';
                 if (trigger.disabled || /cannot be changed while the agent is running/i.test(aria)) {
-                    return { busy: true, error: 'Agent is currently running' };
+                    return { busy: true, error: '智能体正在生成中，请等待本轮回复结束后刷新' };
                 }
 
                 trigger.click();
                 await new Promise(r => setTimeout(r, 400));
 
                 const menu = document.querySelector('.agy-overlay[role="menu"], [role="menu"]');
-                if (!menu) return { busy: true, error: 'Model menu did not open' };
+                if (!menu) return { busy: true, error: '未能打开桌面端模型菜单' };
 
                 const usageItem = Array.from(menu.querySelectorAll('.agy-overlay-item, [role="menuitem"], button, a'))
                     .find(el => /view usage|查看用量|usage|quota|额度/i.test(el.innerText || ''));
                 if (!usageItem) {
                     document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-                    return { error: 'View Usage entry not found' };
+                    return { error: '未在菜单中找到「查看用量」入口' };
                 }
 
                 usageItem.click();
@@ -1694,7 +1694,7 @@ async function getModelQuota(cdp, forceRefresh = false) {
                 document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
             }
 
-            if (!rawText) return { error: 'Usage quota details not found' };
+            if (!rawText) return { error: '未读取到用量额度详情' };
             return { success: true, rawText };
         } catch (err) {
             try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); } catch (e) {}
@@ -1732,7 +1732,7 @@ async function getModelQuota(cdp, forceRefresh = false) {
     if (cachedQuota) {
         return { success: true, ...cachedQuota, stale: true, busy: !!lastRes?.busy };
     }
-    return { success: false, busy: !!lastRes?.busy, error: lastRes?.error || 'Failed to inspect model quota' };
+    return { success: false, busy: !!lastRes?.busy, error: lastRes?.error || '获取模型剩余额度失败' };
 }
 
 // Simple hash function
@@ -2618,7 +2618,7 @@ async function main() {
         // Switch active Antigravity CDP window target
         app.post('/switch-target', async (req, res) => {
             const { wsUrl } = req.body || {};
-            if (!wsUrl) return res.status(400).json({ success: false, error: 'wsUrl required' });
+            if (!wsUrl) return res.status(400).json({ success: false, error: '缺少目标窗口 wsUrl 参数' });
             try {
                 await switchCDPTarget(wsUrl);
                 res.json({ success: true });
@@ -2629,10 +2629,10 @@ async function main() {
 
         // Upload & attach image to Antigravity composer via CDP DOM.setFileInputFiles
         app.post('/upload-image', async (req, res) => {
-            if (!cdpConnection) return res.status(503).json({ success: false, error: 'CDP not connected' });
+            if (!cdpConnection) return res.status(503).json({ success: false, error: '桌面端 CDP 未连接' });
             const { dataBase64, mimeType, fileName, caption } = req.body || {};
             if (!dataBase64 || typeof dataBase64 !== 'string') {
-                return res.status(400).json({ success: false, error: 'Image data required' });
+                return res.status(400).json({ success: false, error: '缺少图片数据' });
             }
 
             const extMap = { 'image/png': '.png', 'image/jpeg': '.jpg', 'image/jpg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif' };
@@ -2641,7 +2641,7 @@ async function main() {
             const cleanBase64 = dataBase64.replace(/^data:image\/[a-z0-9+.-]+;base64,/i, '');
             const buf = Buffer.from(cleanBase64, 'base64');
             if (!buf.length || buf.length > 12 * 1024 * 1024) {
-                return res.status(400).json({ success: false, error: 'Invalid or oversized image (max 12MB)' });
+                return res.status(400).json({ success: false, error: '图片无效或超过 12MB 上限' });
             }
 
             const safeBase = String(fileName || 'mobile_image').replace(/[^a-zA-Z0-9._-]/g, '_').replace(/\.[^.]+$/, '') || 'mobile_image';
@@ -2675,7 +2675,7 @@ async function main() {
 
                 if (!fileNode?.nodeId) {
                     try { fs.unlinkSync(tmpFile); } catch (e) {}
-                    return res.status(404).json({ success: false, error: 'Desktop file input not found' });
+                    return res.status(404).json({ success: false, error: '未找到桌面端文件上传控件' });
                 }
 
                 await cdpConnection.call('DOM.setFileInputFiles', {
@@ -2797,15 +2797,15 @@ async function main() {
         app.get('/git-diff', async (req, res) => {
             const relFile = String(req.query.file || '').trim();
             if (!relFile || relFile.includes('..') || relFile.startsWith('/') || /^[a-zA-Z]:/.test(relFile)) {
-                return res.status(400).json({ success: false, error: 'Invalid file path' });
+                return res.status(400).json({ success: false, error: '文件路径非法' });
             }
             try {
                 const gitRoot = await resolveGitRoot();
-                if (!gitRoot) return res.status(404).json({ success: false, error: 'No git repository found' });
+                if (!gitRoot) return res.status(404).json({ success: false, error: '当前工作区不是 Git 仓库' });
 
                 const { stdout: statusOut } = await execFileAsync('git', ['-C', gitRoot, 'status', '--porcelain=v1', '--', relFile], { timeout: 3000 });
                 if (!statusOut.trim()) {
-                    return res.status(404).json({ success: false, error: 'File has no uncommitted changes' });
+                    return res.status(404).json({ success: false, error: '该文件当前没有未提交改动' });
                 }
 
                 let diffText = '';

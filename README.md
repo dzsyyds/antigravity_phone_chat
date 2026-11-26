@@ -1,295 +1,136 @@
 <div align="center">
-  <img src="./assets/antigravity.png" alt="Antigravity Phone Connect" width="300">
-  <h1>Antigravity Phone Connect 📱</h1>
+
+<img src="assets/antigravity.png" alt="Antigravity 掌上控制台 Logo" width="84" />
+
+# Antigravity 掌上控制台 📱
+
+**面向 Antigravity 2.0 的全中文手机端实时监控与远程控制 WebUI**
+
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+[![Release](https://img.shields.io/badge/版本-v0.4.0-emerald.svg)](RELEASE_NOTES.md)
+[![Antigravity 2.0](https://img.shields.io/badge/适配-Antigravity%202.0-indigo.svg)](#核心特性)
+[![CI Check](https://github.com/dzsyyds/antigravity_phone_chat/actions/workflows/ci.yml/badge.svg)](https://github.com/dzsyyds/antigravity_phone_chat/actions/workflows/ci.yml)
+
+[核心特性](#核心特性) · [快速开始](#快速开始) · [公网远程访问](#公网远程访问) · [版本记录](RELEASE_NOTES.md) · [开源协议与致谢](#开源协议与致谢)
+
 </div>
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
+---
 
-**Antigravity Phone Connect** is a high-performance, real-time mobile monitor and remote control for your Antigravity AI sessions. It allows you to step away from your desk while keeping full sight and control over your AI's thinking process and generations.
-
-- **🚀 Lightning Fast Snapshots**: Sub-100ms mirroring of the Antigravity chat via Chrome DevTools Protocol (CDP).
-- **🛡️ Security First**: Built-in security audits, XSS protection via a strict Content Security Policy (No-Inline-JS), and encrypted session handling via signed `httpOnly` cookies.
-- **📱 Mobile-First History**: Access and switch conversation history from a sleek, full-screen mobile drawer with native-feel cards and micro-animations.
-- **🏠 One-Tap Connect**: Automatically trusts your local home Wi-Fi (LAN) for instant access, while maintaining a Zero-Trust policy with password protection for all external traffic.
-
-![Antigravity Phone Connect](./assets/release_generic-1.png)
-
-![Antigravity Phone Connect](./assets/global_access_hero_2.png)
-
-**Note:** This enhanced edition builds upon [krishnakanthb13/antigravity_phone_chat](https://github.com/krishnakanthb13/antigravity_phone_chat) (originally forked from [gherghett/Antigravity-Shit-Chat](https://github.com/gherghett/Antigravity-Shit-Chat)) under **GNU GPL v3**, adding full **Antigravity 2.0** support, Android mobile stability & keyboard ergonomics, multi-window switching, mobile image upload, workspace Git Diff viewer, and completion alerts.
+> [!NOTE]
+> **关于本项目（GPL-3.0 合规二次开发声明）**
+> 本仓库为开源项目 [`krishnakanthb13/antigravity_phone_chat`](https://github.com/krishnakanthb13/antigravity_phone_chat)（其前身为 [`gherghett/Antigravity-Shit-Chat`](https://github.com/gherghett/Antigravity-Shit-Chat)）的公开 Fork 分支，严格遵循 **GNU GPL v3.0** 协议保留完整版权声明与提交历史。
+> 针对 **Antigravity 2.0 桌面端架构变更** 以及 **国内手机浏览器的实际使用痛点**，本分支已完成全中文界面重构与大量底层稳定性增强。
 
 ---
 
-## ✨ 增强版核心升级 (Enhanced Features)
+## 核心特性
 
-- **⚡ Antigravity 2.0 全面适配**:
-  - 支持 `[data-testid="autoscroll-viewport"]`、`size-container` / `mask-image` 中和、`:root` CSS 变量动态提取；
-  - 兼容 Lexical 编辑器 `[data-testid="send-button"]` 发送与原生 CDP 输入兜底、动态多端口会话跳转。
-- **📱 深度安卓移动端体验与防闪退优化**:
-  - **增量 DOM Patch + `htmlHash` 差异缓存**: 未变化的对话节点与图片保持复用，不再整页重建；未变更时 `/snapshot` 仅返回约百字节；
-  - **无模糊合成层开销**: 移除常驻工具栏 `backdrop-filter`，避免低/中端安卓设备 GPU OOM 闪退；
-  - **防黑屏键盘贴底 (`interactive-widget=resizes-content` + `visualViewport` 双重锁定)**: 输入法弹出不顶飞页面，支持 `⏎ 回车:发送/换行` 切换、中文 IME 联想防误发、`／` `/` `＠` `@` 快捷插入、轻点聊天空白处收起键盘。
-- **📊 模型剩余额度实时查看 (`GET /quota`)**:
-  - 手机端一键读取 Antigravity 的 `View Usage` 用量数据（如 Gemini / Claude & GPT 的 5 小时与每周剩余百分比及重置倒计时），带可视化进度条与手动刷新。
-- **🪟 多窗口切换 (`GET /targets` · `POST /switch-target`)**:
-  - 在手机端一键枚举并切换电脑上打开的多个 Antigravity 项目窗口。
-- **📷 手机端拍照 / 截图直接发送 (`POST /upload-image`)**:
-  - 手机选图后前端 Canvas 自动压缩并预览，通过 CDP `DOM.setFileInputFiles` 直接注入桌面端输入框发送（可附带文字说明）。
-- **📂 工作区 Git 改动与红绿 Diff 查看器 (`GET /git-status` · `GET /git-diff`)**:
-  - 顶部状态栏实时显示改动文件数，手机端即可查看分支状态与逐行红绿 `+ / -` Diff。
-- **🔔 任务完成与待审批提醒**:
-  - 支持开启提醒开关：当 AI 从“执行中”变为完成，或桌面端弹出“运行/允许/确认”待审批操作时，自动触发震动、提示音与通知栏提醒。
+### 1. 全中文移动端与 Antigravity 2.0 深度适配
+- **全界面中文化**：手机主控台（[`public/index.html`](public/index.html)）、登录鉴权页（[`public/login.html`](public/login.html)）、交互提示与服务端报错全面汉化。
+- **去除海外外链阻断**：移除会拖慢国内移动网络的 Google Fonts 外部字体请求，手机端秒开响应。
+- **Antigravity 2.0 镜像与注入兼容**：适配新版桌面端 DOM 结构、`:root` CSS 变量同步以及 Lexical 富文本输入框，远程发消息、停生成、审批操作（Allow / Reject 等）精准直达。
 
----
+### 2. 顶部栏「一眼可见」模型剩余额度
+- **无需点开二级菜单**：顶部设置栏首位直接常驻显示当前剩余额度胶囊（例如 `5h 82% · 周 94%`），并按剩余百分比自动变色（正常绿 / 预警橙 / 低额红）。
+- **分组详情与即时刷新**：后端 `/quota` 接口带 `120s` 缓存与启动预热；点击胶囊可展开完整模型分组额度及重置倒计时，并支持一键 `🔄 立即刷新`。
 
-## 🌐 国内网络 Cpolar + Clash TUN 避坑指南 (China Remote Access)
+### 3. 手机传图、多窗口切换与代码 Diff 审阅
+- **多工作区窗口切换（`/targets` & `/switch-target`）**：电脑同时打开多个 Antigravity 桌面窗口时，手机端点击窗口胶囊即可一键切换监听目标。
+- **手机端压缩传图（`/upload-image`）**：相册选图后在前端 Canvas 自动压缩，再经由 CDP `DOM.setFileInputFiles` 直接注入桌面端输入框；若桌面端仍在生成会提前拦截，避免残留空附件。
+- **Git 改动审阅（`/git-status` & `/git-diff`）**：手机端直接查看当前工作区所在分支、未提交文件数量及红绿高亮的逐行 Diff；支持 `execFile` 参数隔离与路径遍历校验。
+- **完成与审批提醒**：支持开启声音提示、手机震动与浏览器通知，长任务结束或出现需要人工确认的操作时即时提醒。
 
-如果电脑同时开启 **Clash Verge TUN 模式** 与 **cpolar**（如 `cpolar http 3000 -region cn_top`）：
-1. Clash 代理模式建议保持在 **`规则 (Rule)`**（而非全局 `Global`），并确保代理组选择了延迟正常的可用节点；
-2. 将 `cpolar.exe`、`.cpolar.cn/.com/.top`、服务端 IP 与 `4443` 端口加入 `DIRECT` 直连规则；
-3. 启动 `cpolar` 前清空终端代理环境变量并设置 `NO_PROXY=*`：
-   ```bat
-   set HTTP_PROXY=
-   set HTTPS_PROXY=
-   set ALL_PROXY=
-   set NO_PROXY=*
-   cpolar.exe http 3000 -region cn_top
-   ```
+### 4. 安卓软键盘与防崩溃深度优化
+- **键盘弹出不遮挡、不抖动**：启用 `interactive-widget=resizes-content`，结合 `visualViewport` 动态锁定视口与紧凑模式，点击对话区域自动收起输入法，彻底解决安卓浏览器顶飞输入框问题。
+- **增量 DOM 补丁与低内存运行**：用 `patchChatHtml` 增量更新替代整树重绘；清理十余处高显存消耗的 `backdrop-filter` 模糊层；服务端基于 `htmlHash` 仅在变化时下发更新（轮询间隔 `1500ms`），显著降低手机 WebView 闪退率。
+- **独立回看历史消息**：区分脚本自动滚底与手动上滑回看，不再出现强行抢滚动条的情况。
 
 ---
 
-## 🚀 Quick Start
+## 快速开始
 
-> 💡 **Tip:** While we recommend starting Antigravity first, the server is now smart enough to wait and automatically connect whenever Antigravity becomes available!
+### 前置条件
+- **Node.js**（建议 v18 及以上）
+- **Antigravity 桌面端** 需带调试端口启动（默认监听 `9000`–`9003` 端口）：
 
-### Step 1: Launch Antigravity in Debug Mode
-
-Start Antigravity with the remote debugging port enabled:
-
-**Option A: Using Right-Click Context Menu (Recommended)**
-- Run `install_context_menu.bat` (Windows) or `./install_context_menu.sh` (Linux) and select **[1] Install**
-- Then right-click any project folder → **"Open with Antigravity (Debug)"** (now with visual icons!)
-
-**Option B: Manual Command**
-```bash
-antigravity . --remote-debugging-port=9000
+```powershell
+# Windows 启动示例（根据实际安装路径调整）
+antigravity --remote-debugging-port=9000
 ```
 
-### Step 2: Open or Start a Chat
+### 安装与运行
 
-- In Antigravity, open an **existing chat** from the bottom-right panel, **OR**
-- Start a **new chat** by typing a message
-
-> 💡 The server needs an active chat session to capture snapshots. Without this, you'll see "chat container not found" errors.
-
-### Step 3: Run the Server
-
-**Windows:**
-```
-Double-click start_ag_phone_connect.bat
-```
-
-**macOS / Linux:**
-```bash
-chmod +x start_ag_phone_connect.sh   # First time only
-./start_ag_phone_connect.sh
-```
-
-The script will:
-- **Auto-setup a Python Virtual Environment (`venv`)** (Fixes PEP 668 issues on Arch/Linux)
-- Verify Node.js and Python dependencies
-- Auto-kill any existing server on port 3000
-- **Wait for Antigravity** if it's not started yet
-- Display a **QR Code** and your **Link** (e.g., `https://192.168.1.5:3000`)
-- Provide numbered steps for easy connection
-
-### Step 4: Connect Your Phone (Local Wi-Fi)
-
-1. Ensure your phone is on the **same Wi-Fi network** as your PC
-2. Open your mobile browser and enter the **URL shown in the terminal**
-3. If using HTTPS: Accept the self-signed certificate warning on first visit
-
----
-
-## 🌍 NEW: Global Remote Access (Web Mode)
-
-Access your Antigravity session from **anywhere in the world** (Mobile Data, outside Wi-Fi) with secure passcode protection.
-
-### Step 1: Choose a Tunnel Provider
-
-You can use **ngrok** (requires account), **Cloudflare Tunnel** (requires `cloudflared`), or **Pinggy** (free SSH tunnel, no account/install needed).
-
-#### Option A: ngrok (Default)
-1. **Get an ngrok Token**: Sign up for free at [ngrok.com](https://ngrok.com) and get your "Authtoken".
-2. **Setup**: Update your `.env` file:
-   ```env
-   TUNNEL_PROVIDER=ngrok
-   NGROK_AUTHTOKEN=your_token_here
-   ```
-
-#### Option B: Cloudflare Tunnel
-1. **Install cloudflared**: Follow the [official guide](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/get-started-guide/local/instance/install-run/) to install `cloudflared` on your system.
-2. **Setup**: Update your `.env` file:
-   ```env
-   TUNNEL_PROVIDER=cloudflare
-   ```
-
-#### Option C: Pinggy Tunnel
-1. **No Install Required**: Pinggy works via SSH and the Python SDK. The launcher will automatically install the `pinggy` pip package.
-2. **Setup**: Update your `.env` file:
-   ```env
-   TUNNEL_PROVIDER=pinggy
-   ```
-   *(Optional)* You can add `PINGGY_TOKEN=your-token` for a persistent subdomain if you have a Pinggy account.
-
-### Step 2: Configuration
-1. **Automatic Configuration**: Simply run any launcher script. They will detect if `.env` is missing and automatically create it using `.env.example` as a template.
-2. **Manual Setup**: Alternatively, copy `.env.example` to `.env` manually and update the values:
+1. **克隆仓库并安装依赖**
    ```bash
-   copy .env.example .env   # Windows
-   cp .env.example .env     # Mac/Linux
+   git clone https://github.com/dzsyyds/antigravity_phone_chat.git
+   cd antigravity_phone_chat
+   npm install
    ```
-   Ensure you set a secure password:
+
+2. **配置环境变量与访问口令**
+   ```bash
+   cp .env.example .env
+   ```
+   编辑 `.env` 文件，务必将 `APP_PASSWORD` 修改为你自己的强口令（默认端口为 `3000`，可通过 `PORT` 修改）：
    ```env
-   APP_PASSWORD=your_secure_passcode
+   APP_PASSWORD=请改为你自己的密码
+   PORT=3000
    ```
 
-### Usage
-- **Windows**: Run `start_ag_phone_connect_web.bat`
-- **Mac/Linux**: Run `./start_ag_phone_connect_web.sh`
+3. **运行语法校验并启动服务**
+   ```bash
+   npm run check
+   npm start
+   ```
+   也可直接使用根目录启动脚本 [`start_ag_phone_connect_web.bat`](start_ag_phone_connect_web.bat)（Windows）或 [`start_ag_phone_connect_web.sh`](start_ag_phone_connect_web.sh)（macOS / Linux）。
 
-The script will launch the server and provide a **Public URL** (e.g., `https://abcd-123.ngrok-free.app`). 
-
-**Two Ways to Connect:**
-1. **Magic Link (Easiest)**: Scan the **Magic QR Code** displayed in the terminal. It logs you in automatically!
-2. **Manual**: 
-   - Open the URL on your phone.
-   - Enter your `APP_PASSWORD` to log in.
-
-> 💡 **Tip:** Devices on the same local Wi-Fi still enjoy direct access without needing a password.
+4. **手机访问**
+   - **同一局域网 Wi-Fi**：手机浏览器打开终端输出的局域网地址 `http://<电脑局域网IP>:3000`（如已配置本地证书则为 `https://`）。
+   - **外出 4G/5G 访问**：请参考下方 [公网远程访问](#公网远程访问) 配置内网穿透。
 
 ---
 
-## 🔒 Enabling HTTPS (Recommended)
+## 公网远程访问
 
-For a secure connection without the browser warning icon:
+### 推荐方案：Cpolar（国内移动网络直连稳定）
 
-### Option 1: Command Line
-```bash
-node generate_ssl.js
+在电脑端启动本地 WebUI（默认监听 `3000` 端口）后，使用 `cpolar` 映射公网 HTTPS 地址：
+
+```powershell
+# 建议先在当前终端清理代理环境变量，确保穿透直连稳定
+$env:HTTP_PROXY=""; $env:HTTPS_PROXY=""; $env:ALL_PROXY=""; $env:NO_PROXY="*"
+.\cpolar.exe http 3000 -region cn_top -log stdout
 ```
-- Uses **OpenSSL** if available (includes your IP in certificate)
-- Falls back to **Node.js crypto** if OpenSSL not found
-- Creates certificates in `./certs/` directory
 
-### Option 2: Web UI
-1. Start the server on HTTP
-2. Look for the yellow **"⚠️ Not Secure"** banner
-3. Click **"Enable HTTPS"** button
-4. Restart the server when prompted
+> [!TIP]
+> **Clash Verge / 系统代理并存避坑指南**
+> 如果电脑同时开启了 **Clash Verge（TUN 模式 + 规则模式）**，建议在独立命令行中清空 `HTTP_PROXY` / `HTTPS_PROXY` / `ALL_PROXY` 并设置 `NO_PROXY="*"` 后再启动 `server.js` 与 `cpolar.exe`，可避免隧道握手被本地代理端口劫持，手机端与桌面端可同时保持流畅。
 
-### After Generating:
-1. **Restart the server** - it will automatically detect and use HTTPS.
-2. **On your phone's first visit**:
-   - You'll see a security warning (normal for self-signed certs).
-   - Tap **"Advanced"** → **"Proceed to site"**.
-   - The warning won't appear again!
+### 其他穿透方案
+如需使用 **ngrok** 或 **Cloudflare Tunnel (`cloudflared`)**，可在 `.env` 中配置相应参数，或直接将公网隧道指向 `http://localhost:3000`。对外开放时**务必设置强口令 `APP_PASSWORD`**。
 
 ---
 
-### macOS: Adding Right-Click "Quick Action" (Optional)
+## 项目文件概览
 
-Since macOS requires Automator for context menu entries, follow these steps manually:
+| 路径 | 说明 |
+| :--- | :--- |
+| [`server.js`](server.js) | 核心后端：CDP 连接、Antigravity 2.0 镜像提取、`/quota`、`/targets`、`/upload-image`、`/git-diff` 与鉴权服务 |
+| [`public/index.html`](public/index.html) | 全中文手机主界面布局 |
+| [`public/login.html`](public/login.html) | 全中文登录鉴权页面 |
+| [`public/js/app.js`](public/js/app.js) | 增量 DOM 补丁、安卓软键盘适配、额度胶囊、传图压缩与提醒逻辑 |
+| [`public/css/style.css`](public/css/style.css) | 移动端暗色主题与低 GPU 消耗样式 |
+| [`.env.example`](.env.example) | 中文配置模板（含端口、口令与穿透说明） |
+| [`RELEASE_NOTES.md`](RELEASE_NOTES.md) | 中文版本更新记录 |
+| [`.github/workflows/ci.yml`](.github/workflows/ci.yml) | GitHub Actions 自动检查工作流（`npm run check`） |
 
-1.  Open **Automator** (Spotlight → type "Automator").
-2.  Click **File → New** and select **Quick Action**.
-3.  At the top, set:
-    - "Workflow receives current" → **folders**
-    - "in" → **Finder**
-4.  In the left sidebar, search for **"Run Shell Script"** and drag it to the right pane.
-5.  Set "Shell" to `/bin/zsh` and "Pass input" to **as arguments**.
-6.  Paste this script:
-    ```bash
-    cd "$1"
-    antigravity . --remote-debugging-port=9000
-    ```
-7.  **Save** the Quick Action with a name like `Open with Antigravity (Debug)`.
-8.  Now you can right-click any folder in Finder → **Quick Actions → Open with Antigravity (Debug)**.
+> 原项目附带的英文架构与设计参考文档保留于 [`CODE_DOCUMENTATION.md`](CODE_DOCUMENTATION.md)、[`DESIGN_PHILOSOPHY.md`](DESIGN_PHILOSOPHY.md)、[`SECURITY.md`](SECURITY.md) 与 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
 
 ---
 
-## 🏗️ Architecture Infographic
+## 开源协议与致谢
 
-![Repo Infographic](./assets/repo_infographic.png)
-
----
-
-## 🛡️ Shielding & Account Safety
-
-This tool is designed with a **"Local-First"** security model. 
-
-- **Bridge Mechanism**: It uses the **Chrome DevTools Protocol (CDP)** to mirror the UI of your *already-running* desktop session. It **never** extracts OAuth tokens or interacts with Google/AI-provider APIs directly.
-- **Natural Traffic**: All AI requests are still sent by your official desktop application. To the AI provider, your usage looks identical to normal desktop activity.
-- **Zero Bans**: There have been **no reports** of account flags or bans. This is a "Wireless Viewport," not a third-party client that bypasses official security.
-
----
-
-## ✨ Features
-
-- **🧹 Clean Mobile View (NEW!)**: Automatically filters out redundant Desktop-specific input areas using an aggressive "Nuclear Cleanup" strategy. It targets the main desktop chat box and fixed overlays while carefully **preserving** actionable items like "Review Changes" and permission bars.
-- **Glassmorphism UI (NEW!)**: Sleek and modern quick-action and settings menus featuring a beautiful glassmorphism effect for enhanced mobile usability. Includes customizable, ready-to-use prompt pills (like "Explain this code", "Continue", and "Fix Bugs").
-- **🌙 Improved Dark Mode (NEW!)**: Enhanced UI styling and state capture designed to provide maximum clarity and correct model detection in dark mode.
-- **🧠 Latest AI Models**: Automatically updated support for the latest model versions from Gemini, Claude, and OpenAI.
-- **💖 Support the Developer (NEW!)**: A dedicated heart icon in the mobile header allows users to support the project and the developer with a single tap, opening a premium support modal.
-- **📜 Premium Chat History (NEW!)**: Full-screen history management with a completely redesigned, sleek card-based UI. Features modern loading states, gorgeous gradients, and intelligent strictly-scoped scraping to safely extract past conversations without background noise. Dismissing the history view automatically triggers a remote Escape sequence on the desktop to keep your workspace clean.
-- **➕ One-Tap New Chat (NEW!)**: Start a fresh conversation instantly from your phone without needing to touch your desktop.
-- **🖼️ Context Menu Icons (NEW!)**: Visual icons in the right-click menu for better navigation.
-- **🌍 Global Web Access**: Secure remote access via ngrok tunnel. Access your AI from mobile data with passcode protection.
-- **🛡️ Auto-Cleanup**: Launchers now automatically sweep away "ghost" processes from previous sessions for a clean start every time.
-- **🔒 HTTPS Support**: Secure connections with self-signed SSL certificates.
-- **Local Image Support**: Local images and SVGs (`vscode-file://` paths) in the desktop chat are automatically converted to Base64 so they render perfectly on mobile without exposing local files.
-- **Real-Time Mirroring**: 1-second polling interval for near-instant sync.
-- **Remote Control**: Send messages, stop generations, and switch Modes (Fast/Planning) or Models (Gemini/Claude/GPT) directly from your phone.
-- **Scroll Sync**: When you scroll on your phone, the desktop Antigravity scrolls too!
-- **🎯 Precision Remote Control (NEW!)**: A deterministic targeting layer that prevents "Sync-Fighting". It uses leaf-node filtering to ensure clicks land exactly on buttons, even when nested inside complex DOM structures.
-- **Occurrence Index Tracking**: Robustly handles multiple identical elements (like three "Run" buttons in history) by tracking the specific tapped instance.
-- **Thought & Status Expansion (NEW!)**: Tap on "Thinking...", "Thought", "Worked for", "Edited", or "X files" blocks on your phone to remotely expand/collapse them with intelligent text matching.
-- **Remote Action Support (NEW!)**: Direct support for "Allow", "Deny", "Allow Once", "Review Changes", "Apply", and "Save" buttons. No more walking back to your desk for simple permissions.
-- **Smart Sync**: Bi-directional synchronization ensures your phone always shows the current Model and Mode selected on your desktop.
-- **Premium Mobile UI**: A sleek, dark-themed interface optimized for touch interaction.
-- **Context Menu Management**: Dedicated scripts to **Install, Remove, Restart, or Backup** your Right-Click integrations.
-- **Health Monitoring**: Built-in `/health` endpoint for server status checks.
-- **Graceful Shutdown**: Clean exit on Ctrl+C, closing all connections properly.
-- **Python Virtual Environment (`venv`) Support**: Launcher scripts now automatically create and use a local `venv` (approx. 25-30MB). This ensures compatibility with modern Linux distributions (Arch, Debian 12+) that enforce PEP 668 (externally-managed-environment) and prevents package conflicts on Windows/macOS.
-- **Zero-Config**: The launch scripts handle the heavy lifting of environment setup.
-
----
-
-## 📂 Documentation
-
-For more technical details, check out:
-- [**Code Documentation**](CODE_DOCUMENTATION.md) - Architecture, Data Flow, and API.
-- [**Security Guide**](SECURITY.md) - HTTPS setup, certificate warnings, and security model.
-- [**Design Philosophy**](DESIGN_PHILOSOPHY.md) - Why it was built this way.
-- [**Contributing**](CONTRIBUTING.md) - Guidelines for developers.
-
----
-
-## License
-
-Licensed under the [GNU GPL v3](LICENSE).  
-Copyright (C) 2026 **Krishna Kanth B** (@krishnakanthb13)
-
----
-
-## Star History
-
-<a href="https://www.star-history.com/#krishnakanthb13/antigravity_phone_chat&type=date&legend=top-left">
- <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=krishnakanthb13/antigravity_phone_chat&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=krishnakanthb13/antigravity_phone_chat&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=krishnakanthb13/antigravity_phone_chat&type=date&legend=top-left" />
- </picture>
-</a>
-
----
+- 本项目基于 **GNU General Public License v3.0 (GPL-3.0)** 开源发布，详见 [`LICENSE`](LICENSE) 与 [`package.json`](package.json)。
+- 感谢上游开源作者 **Krishna Kanth B ([`krishnakanthb13/antigravity_phone_chat`](https://github.com/krishnakanthb13/antigravity_phone_chat))** 与最早提出雏形的 **[`gherghett/Antigravity-Shit-Chat`](https://github.com/gherghett/Antigravity-Shit-Chat)**。
+- 欢迎通过 Issue 与 Pull Request 共同完善 Antigravity 2.0 移动端中文生态。
