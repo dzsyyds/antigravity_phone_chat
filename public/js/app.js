@@ -224,6 +224,8 @@ async function fetchAppState() {
             refreshGitBadge();
             fetchQuotaSummary(true);
             if (typeof handleLiveAgentFinished === 'function') handleLiveAgentFinished();
+        } else if (typeof checkFastLiveCompletion === 'function') {
+            checkFastLiveCompletion(nextBusy);
         }
         prevIsBusy = nextBusy;
         isAgentBusy = nextBusy;
@@ -2352,6 +2354,10 @@ let liveBufferFinal = '';
 let liveBufferInterim = '';
 let liveSilenceTimer = null;
 let liveWaitingReply = false;
+let liveSentAt = 0;
+let liveSentHash = '';
+let liveSentResponseCount = 0;
+let liveNoSpeechCount = 0;
 
 (async function checkVoiceCapabilities() {
     try {
@@ -2596,6 +2602,7 @@ function stopLiveSpeech() {
 
 function startLiveListening() {
     if (!isLiveActive) return;
+    liveNoSpeechCount = 0;
     stopLiveSpeech();
     stopLiveRecognition();
 
@@ -2623,6 +2630,7 @@ function startLiveListening() {
 
         rec.onresult = (event) => {
             if (!isLiveActive || livePhase !== 'listening') return;
+            liveNoSpeechCount = 0;
             let interim = '';
             let added = '';
             for (let i = event.resultIndex; i < event.results.length; i++) {
@@ -2652,11 +2660,20 @@ function startLiveListening() {
             const code = ev?.error || '';
             if (code === 'not-allowed' || code === 'permission-denied') {
                 setLivePhase('paused', '麦克风权限被拒绝，请在浏览器开启后点光环继续');
-            } else if ((code === 'service-not-allowed' || code === 'network') && hasGeminiSTT) {
+            } else if (code === 'no-speech') {
+                liveNoSpeechCount++;
+                if (liveNoSpeechCount >= 2) {
+                    stopLiveRecognition();
+                    setLivePhase('paused', '一段时间未检测到声音，已暂停（点击光环继续）');
+                }
+            } else if ((code === 'service-not-allowed' || code === 'network' || code === 'audio-capture') && hasGeminiSTT) {
                 stopLiveRecognition();
                 setLivePhase('listening', '🎙️ 已切换录音模式，说完点「立即发送」');
                 startCloudAudioRecording('live');
                 if (liveSendNowBtn) liveSendNowBtn.disabled = false;
+            } else if (code && code !== 'aborted') {
+                stopLiveRecognition();
+                setLivePhase('paused', '浏览器内置语音识别不可用，可在 .env 配置 GEMINI_API_KEY');
             }
         };
 
@@ -2665,7 +2682,7 @@ function startLiveListening() {
                 const combined = (liveBufferFinal + liveBufferInterim).trim();
                 if (combined) {
                     sendLiveTranscriptNow();
-                } else {
+                } else if (liveNoSpeechCount < 2) {
                     setTimeout(() => {
                         if (isLiveActive && livePhase === 'listening') startLiveListening();
                     }, 220);
@@ -2683,7 +2700,7 @@ function startLiveListening() {
 
 async function sendLiveTranscriptNow() {
     if (!isLiveActive) return;
-    if (!SpeechRec && hasGeminiSTT && mediaRecorder && mediaRecorder.state === 'recording') {
+    if (mediaRecorder && recordTargetMode === 'live' && mediaRecorder.state === 'recording') {
         stopLiveRecognition();
         return;
     }
@@ -2698,6 +2715,9 @@ async function sendLiveTranscriptNow() {
     if (liveUserText) liveUserText.textContent = `你说：${text}`;
     if (liveReplyText) liveReplyText.textContent = '等待桌面端生成结果...';
     liveWaitingReply = true;
+    liveSentAt = Date.now();
+    liveSentHash = cachedHtmlHash || '';
+    liveSentResponseCount = chatContent.querySelectorAll('[data-testid="agent-response"]').length;
 
     try {
         if (!chatIsOpen) {
@@ -2760,8 +2780,18 @@ function speakLiveReply(text) {
     }
 }
 
+function checkFastLiveCompletion(nextBusy) {
+    if (!isLiveActive || !liveWaitingReply || nextBusy) return;
+    const elapsed = Date.now() - liveSentAt;
+    const curRespCount = chatContent.querySelectorAll('[data-testid="agent-response"]').length;
+    const hasNewContent = curRespCount > liveSentResponseCount || (cachedHtmlHash && cachedHtmlHash !== liveSentHash);
+    if ((hasNewContent && elapsed > 900) || elapsed > 4500) {
+        handleLiveAgentFinished();
+    }
+}
+
 function handleLiveAgentFinished() {
-    if (!isLiveActive) return;
+    if (!isLiveActive || !liveWaitingReply) return;
     liveWaitingReply = false;
     setTimeout(async () => {
         await loadSnapshot(true);

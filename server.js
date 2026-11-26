@@ -2912,7 +2912,7 @@ async function main() {
             if (!cleanMime.startsWith('audio/')) {
                 return res.status(400).json({ success: false, error: '不支持的音频格式' });
             }
-            const cleanB64 = dataBase64.replace(/^data:audio\/[a-z0-9+.-]+(?:;[^,]+)?;base64,/i, '');
+            const cleanB64 = dataBase64.replace(/^data:[^;]+(?:;[^,]+)*;base64,/i, '');
             const buf = Buffer.from(cleanB64, 'base64');
             if (!buf.length || buf.length > 10 * 1024 * 1024) {
                 return res.status(400).json({ success: false, error: '音频无效或超过 10MB 上限' });
@@ -2923,6 +2923,7 @@ async function main() {
                 const resp = await fetch(apiUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
+                    signal: AbortSignal.timeout(25000),
                     body: JSON.stringify({
                         contents: [{
                             parts: [
