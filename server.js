@@ -304,15 +304,49 @@ async function connectCDP(url) {
 // Capture chat snapshot
 async function captureSnapshot(cdp) {
     const CAPTURE_SCRIPT = `(async () => {
-        const scrollCandidates = Array.from(document.querySelectorAll('[data-testid="autoscroll-viewport"], .overflow-y-auto, [data-scroll-area]'));
-        const cascade = document.querySelector('[data-testid="autoscroll-viewport"]') ||
-                        document.getElementById('conversation') || 
-                        document.getElementById('chat') || 
-                        document.getElementById('cascade') ||
-                        scrollCandidates.find(s => s.scrollHeight > s.clientHeight && s.clientHeight > 200) ||
-                        scrollCandidates[0] ||
-                        document.getElementById('root') ||
-                        document.body;
+        const isSidebarContainer = (el) => {
+            if (!el) return true;
+            if (el.closest('aside, nav, [data-testid*="sidebar"]')) return true;
+            return !!el.querySelector('[data-testid="new-conversation-button"], [data-testid="conversation-archive-button"], [data-testid="sidebar-search-button"]');
+        };
+
+        const primaryChat = document.querySelector('[data-testid="autoscroll-viewport"]') ||
+                            document.getElementById('conversation') ||
+                            document.getElementById('chat') ||
+                            document.getElementById('cascade');
+
+        let cascade = primaryChat;
+        if (!cascade) {
+            // If Antigravity is on a brand-new blank conversation (composer visible, no messages yet),
+            // return a clean blank placeholder instead of falling back to the sidebar history list!
+            const hasComposer = !!document.querySelector('[data-lexical-editor], .surface-composer, .surface-composer-card, [contenteditable="true"]');
+            const isNewRootUrl = (location.pathname || '/') === '/';
+            if (hasComposer || isNewRootUrl) {
+                const blankHtml = '<div data-testid="autoscroll-viewport" data-ag-new-chat="true" style="padding: 56px 16px; text-align: center; color: #94a3b8;"><div data-quotable-root="true"><div style="font-size: 16px; font-weight: 600; color: #f1f5f9; margin-bottom: 8px;">全新对话已就绪</div><div style="font-size: 13px; color: #94a3b8;">请在下方输入或语音发送第一条指令。</div></div></div>';
+                const blankRules = [];
+                for (const sheet of document.styleSheets) {
+                    try { for (const rule of sheet.cssRules) blankRules.push(rule.cssText); } catch (e) {}
+                }
+                const extractVars = (raw) => (String(raw || '').match(/--[a-zA-Z0-9_-]+\\s*:[^;]+/g) || []).join('; ');
+                const blankCss = ':root, html, body { ' + extractVars(document.documentElement.getAttribute('style')) + '; ' + extractVars(document.body?.getAttribute('style')) + '; }\\n' + blankRules.join('\\n');
+                return {
+                    html: blankHtml,
+                    css: blankCss,
+                    backgroundColor: '#07070a',
+                    color: '#f8fafc',
+                    fontFamily: 'inherit',
+                    scrollInfo: { scrollTop: 0, scrollHeight: 0, clientHeight: 0, scrollPercent: 0 },
+                    stats: { nodes: 4, htmlSize: blankHtml.length, cssSize: blankCss.length }
+                };
+            }
+
+            const scrollCandidates = Array.from(document.querySelectorAll('.overflow-y-auto, [data-scroll-area]'))
+                .filter(el => !isSidebarContainer(el));
+            cascade = scrollCandidates.find(s => s.scrollHeight > s.clientHeight && s.clientHeight > 200) ||
+                      scrollCandidates[0] ||
+                      document.getElementById('root') ||
+                      document.body;
+        }
         if (!cascade) {
             const body = document.body;
             const childIds = Array.from(body.children).map(c => c.id).filter(id => id).join(', ');
@@ -1036,19 +1070,41 @@ async function setModel(cdp, modelName) {
 async function startNewChat(cdp) {
     const EXP = `(async () => {
         try {
-            const allButtons = Array.from(document.querySelectorAll('button, [role="button"], a'));
+            const isVisible = (el) => el && el.offsetParent !== null;
+            const preferredSelectors = [
+                'a[aria-label="New Conversation in Project"]',
+                '[data-testid="new-conversation-button"]',
+                '[data-testid="app-icon-new-conversation-button"]',
+                'button[aria-label="New Conversation"]',
+                'button[aria-label*="新建会话"]',
+                'button[aria-label*="New Conversation"]'
+            ];
+            for (const sel of preferredSelectors) {
+                const btn = Array.from(document.querySelectorAll(sel)).find(isVisible);
+                if (btn) {
+                    btn.click();
+                    return { success: true, method: 'selector:' + sel };
+                }
+            }
+
+            const allButtons = Array.from(document.querySelectorAll('button, [role="button"], a')).filter(isVisible);
             const newChatBtn = allButtons.find(btn => {
                 const txt = (btn.innerText || '').trim();
                 const aria = (btn.getAttribute('aria-label') || '').toLowerCase();
-                return txt === '新建会话' || aria.includes('new conversation') || aria.includes('新建');
+                return txt === '新建会话' || txt === 'New Conversation' || aria === 'new conversation' || aria.includes('新建对话');
             });
             if (newChatBtn) {
                 newChatBtn.click();
                 return { success: true, method: 'dom_button' };
             }
 
-            // Fallback: navigate via CDP Page.navigate to root
-            return { success: true, method: 'fallback_needed' };
+            if (/^https?:\\/\\/(127\\.0\\.0\\.1|localhost)(:\\d+)?$/i.test(location.origin)) {
+                const params = new URLSearchParams(location.search || '');
+                const project = params.get('project');
+                const rootUrl = project ? (location.origin + '/?project=' + encodeURIComponent(project)) : (location.origin + '/');
+                return { success: false, navigateTo: rootUrl };
+            }
+            return { success: false, error: '未找到新建对话按钮' };
         } catch(e) {
             return { error: e.toString() };
         }
@@ -1062,10 +1118,15 @@ async function startNewChat(cdp) {
                 awaitPromise: true,
                 contextId: ctx.id
             });
-            if (res.result?.value?.success) return res.result.value;
+            const val = res.result?.value;
+            if (val?.success) return val;
+            if (val?.navigateTo) {
+                await cdp.call("Page.navigate", { url: val.navigateTo });
+                return { success: true, method: 'cdp_navigate_root', url: val.navigateTo };
+            }
         } catch (e) { }
     }
-    return { error: 'Context failed' };
+    return { success: false, error: '无法开启新对话，请确认桌面端窗口在线' };
 }
 // Get Chat History - Click history button and scrape conversations
 async function getChatHistory(cdp) {
@@ -2587,8 +2648,24 @@ async function main() {
 
         // Start New Chat
         app.post('/new-chat', async (req, res) => {
-            if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
+            if (!cdpConnection) return res.status(503).json({ error: '桌面端 CDP 未连接' });
             const result = await startNewChat(cdpConnection);
+            if (result?.success) {
+                const blankHtml = '<div data-testid="autoscroll-viewport" data-ag-new-chat="true" style="padding: 56px 16px; text-align: center; color: #94a3b8;"><div data-quotable-root="true"><div style="font-size: 16px; font-weight: 600; color: #f1f5f9; margin-bottom: 8px;">全新对话已就绪</div><div style="font-size: 13px; color: #94a3b8;">请在下方输入或语音发送第一条指令。</div></div></div>';
+                const blankHash = hashString(blankHtml);
+                lastSnapshot = {
+                    html: blankHtml,
+                    css: lastSnapshot?.css || '',
+                    cssHash: cachedCSSHash || lastSnapshot?.cssHash || null,
+                    htmlHash: blankHash,
+                    backgroundColor: '#07070a',
+                    color: '#f8fafc',
+                    fontFamily: 'inherit',
+                    scrollInfo: { scrollTop: 0, scrollHeight: 0, clientHeight: 0, scrollPercent: 0 },
+                    stats: { nodes: 4, htmlSize: blankHtml.length, cssSize: (lastSnapshot?.css || '').length }
+                };
+                lastSnapshotHash = blankHash;
+            }
             res.json(result);
         });
 

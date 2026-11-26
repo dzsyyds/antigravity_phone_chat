@@ -1445,12 +1445,14 @@ async function startNewChat() {
         const data = await res.json();
 
         if (data.success) {
+            cachedHtmlHash = '';
+            chatContent.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>正在开启全新对话...</p></div>';
             showToast('已为您开启全新对话', 'success');
-            setTimeout(loadSnapshot, 500);
-            setTimeout(loadSnapshot, 1100);
-            setTimeout(fetchAppState, 1300);
+            setTimeout(() => loadSnapshot(true), 450);
+            setTimeout(() => loadSnapshot(true), 1000);
+            setTimeout(fetchAppState, 1200);
         } else {
-            showToast('新建对话失败', 'error');
+            showToast(data.error || '新建对话失败', 'error');
         }
     } catch (e) {
         showToast('新建对话异常', 'error');
