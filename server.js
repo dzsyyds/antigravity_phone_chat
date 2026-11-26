@@ -2646,6 +2646,127 @@ async function main() {
             res.json(result);
         });
 
+        // Expand older messages in Antigravity 2.0 virtualized viewport
+        app.post('/load-older', async (req, res) => {
+            if (!cdpConnection) return res.status(503).json({ success: false, error: '桌面端 CDP 未连接' });
+            const LOAD_EXP = `(async () => {
+                const btn = document.querySelector('[data-testid="load-older-messages-button"]');
+                if (!btn) return { success: false, error: '当前对话已完整展示，无更多更早消息' };
+                const aria = btn.getAttribute('aria-label') || '';
+                btn.click();
+                return { success: true, aria };
+            })()`;
+            try {
+                for (const ctx of cdpConnection.contexts) {
+                    const r = await cdpConnection.call('Runtime.evaluate', {
+                        expression: LOAD_EXP,
+                        returnByValue: true,
+                        awaitPromise: true,
+                        contextId: ctx.id
+                    }).catch(() => null);
+                    if (r?.result?.value) {
+                        const val = r.result.value;
+                        if (val.success) {
+                            await new Promise(resolve => setTimeout(resolve, 650));
+                            const snap = await captureSnapshot(cdpConnection);
+                            if (snap && !snap.error) {
+                                const hash = hashString(snap.html);
+                                const cssHash = snap.css ? hashString(snap.css) : cachedCSSHash;
+                                cachedCSSHash = cssHash;
+                                snap.cssHash = cssHash;
+                                snap.htmlHash = hash;
+                                lastSnapshot = snap;
+                                lastSnapshotHash = hash;
+                            }
+                            return res.json({ success: true, aria: val.aria });
+                        }
+                        return res.json(val);
+                    }
+                }
+                return res.json({ success: false, error: '未检测到可展开的历史消息按钮' });
+            } catch (err) {
+                return res.status(500).json({ success: false, error: err.message });
+            }
+        });
+
+        // Read complete chronological turns of the active conversation directly from disk (works even while AI is busy!)
+        app.get('/current-transcript', async (req, res) => {
+            try {
+                let convId = '';
+                if (cdpConnection) {
+                    for (const ctx of cdpConnection.contexts) {
+                        const r = await cdpConnection.call('Runtime.evaluate', {
+                            expression: 'location.pathname',
+                            returnByValue: true,
+                            contextId: ctx.id
+                        }).catch(() => null);
+                        const p = String(r?.result?.value || '');
+                        const m = p.match(/\/c\/([0-9a-f-]+)/i);
+                        if (m) { convId = m[1]; break; }
+                    }
+                }
+                if (!convId) {
+                    return res.json({ success: true, convId: '', totalTurns: 0, turns: [] });
+                }
+
+                const tPath = join(os.homedir(), '.gemini', 'antigravity', 'brain', convId, '.system_generated', 'logs', 'transcript.jsonl');
+                if (!fs.existsSync(tPath)) {
+                    return res.json({ success: true, convId, totalTurns: 0, turns: [] });
+                }
+
+                const rawLines = fs.readFileSync(tPath, 'utf8').split(/\r?\n/).filter(Boolean);
+                const query = String(req.query.q || '').trim().toLowerCase();
+                const turns = [];
+
+                for (const line of rawLines) {
+                    let obj;
+                    try { obj = JSON.parse(line); } catch (e) { continue; }
+                    if (obj.type === 'USER_INPUT' && typeof obj.content === 'string') {
+                        let txt = obj.content;
+                        const reqMatch = txt.match(/<USER_REQUEST>\s*([\s\S]*?)\s*<\/USER_REQUEST>/i);
+                        if (reqMatch) {
+                            txt = reqMatch[1].trim();
+                        } else {
+                            txt = txt
+                                .replace(/<ADDITIONAL_METADATA>[\s\S]*?<\/ADDITIONAL_METADATA>/gi, '')
+                                .replace(/<USER_SETTINGS_CHANGE>[\s\S]*?<\/USER_SETTINGS_CHANGE>/gi, '')
+                                .replace(/<CONTEXT_SUMMARY>[\s\S]*?<\/CONTEXT_SUMMARY>/gi, '[较早对话上下文摘要]')
+                                .trim();
+                        }
+                        if (!txt) txt = '(图片或上下文消息)';
+                        turns.push({
+                            role: 'user',
+                            step: obj.step_index,
+                            time: obj.created_at || '',
+                            text: txt.length > 3000 ? txt.slice(0, 3000) + '\n...(过长已截断)' : txt
+                        });
+                    } else if (obj.type === 'PLANNER_RESPONSE' && typeof obj.content === 'string' && obj.content.trim()) {
+                        const txt = obj.content.trim();
+                        turns.push({
+                            role: 'assistant',
+                            step: obj.step_index,
+                            time: obj.created_at || '',
+                            text: txt.length > 4000 ? txt.slice(0, 4000) + '\n...(过长已截断)' : txt
+                        });
+                    }
+                }
+
+                const filtered = query
+                    ? turns.filter(t => t.text.toLowerCase().includes(query))
+                    : turns;
+
+                return res.json({
+                    success: true,
+                    convId,
+                    totalTurns: turns.length,
+                    matchedTurns: filtered.length,
+                    turns: filtered
+                });
+            } catch (err) {
+                return res.status(500).json({ success: false, error: err.message, turns: [] });
+            }
+        });
+
         // Start New Chat
         app.post('/new-chat', async (req, res) => {
             if (!cdpConnection) return res.status(503).json({ error: '桌面端 CDP 未连接' });

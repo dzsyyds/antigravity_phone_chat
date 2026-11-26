@@ -74,6 +74,7 @@ let isAgentBusy = false;
 let chatIsOpen = true;
 let cachedCssHash = '';
 let cachedHtmlHash = '';
+let hasRenderedFirstSnapshot = false;
 let cachedHistoryChats = [];
 let currentFullscreenCode = '';
 let isFetchingAppState = false;
@@ -827,21 +828,23 @@ th, td {
         if (data.html) {
             cachedHtmlHash = data.htmlHash || '';
             patchChatHtml(data.html);
+            if (typeof syncOlderHistoryBanner === 'function') syncOlderHistoryBanner();
         }
 
         const nextScrollHeight = chatContainer.scrollHeight;
         const heightDelta = Math.abs(nextScrollHeight - scrollHeight);
 
-        if (forceBottom) {
+        if (forceBottom || !hasRenderedFirstSnapshot) {
+            hasRenderedFirstSnapshot = true;
             userIsScrolling = false;
             userScrollLockUntil = 0;
             scrollToBottom(false);
-        } else if (isNearBottom || scrollPos === 0) {
+        } else if (isNearBottom) {
             if (heightDelta > 2 || Math.abs(nextScrollHeight - chatContainer.scrollTop - clientHeight) > 4) {
                 scrollToBottom(false);
             }
         } else {
-            // User is reading earlier messages: guard against browser clamping scrollTop during DOM patch
+            // User is reading earlier messages (even at scrollTop === 0): never yank them back to bottom!
             const targetTop = (isUserScrollLocked && heightDelta > 2 && scrollHeight > 0)
                 ? nextScrollHeight * (scrollPos / scrollHeight)
                 : scrollPos;
@@ -1446,6 +1449,7 @@ async function startNewChat() {
 
         if (data.success) {
             cachedHtmlHash = '';
+            hasRenderedFirstSnapshot = false;
             chatContent.innerHTML = '<div class="loading-state"><div class="loading-spinner"></div><p>正在开启全新对话...</p></div>';
             showToast('已为您开启全新对话', 'success');
             setTimeout(() => loadSnapshot(true), 450);
@@ -1607,6 +1611,8 @@ async function selectChat(idOrTitle) {
         const data = await res.json();
 
         if (data.success) {
+            cachedHtmlHash = '';
+            hasRenderedFirstSnapshot = false;
             showToast('已切换会话，正在同步内容', 'info', 1600);
             let attempts = 0;
             const poll = setInterval(async () => {
@@ -2913,6 +2919,131 @@ if (liveStopBtn) {
         liveWaitingReply = false;
         setTimeout(() => { if (isLiveActive) startLiveListening(); }, 400);
     });
+}
+
+// --- Older Messages Expander & Full Conversation Transcript Drawer ---
+const olderHistoryBanner = document.getElementById('olderHistoryBanner');
+const olderBannerInfo = document.getElementById('olderBannerInfo');
+const loadOlderBtn = document.getElementById('loadOlderBtn');
+const openTranscriptFromBannerBtn = document.getElementById('openTranscriptFromBannerBtn');
+const fullTranscriptBtn = document.getElementById('fullTranscriptBtn');
+const transcriptLayer = document.getElementById('transcriptLayer');
+const closeTranscriptBtn = document.getElementById('closeTranscriptBtn');
+const transcriptCountBadge = document.getElementById('transcriptCountBadge');
+const transcriptSearchInput = document.getElementById('transcriptSearchInput');
+const transcriptList = document.getElementById('transcriptList');
+const transcriptTopBtn = document.getElementById('transcriptTopBtn');
+const transcriptBottomBtn = document.getElementById('transcriptBottomBtn');
+let cachedTranscriptTurns = [];
+
+function syncOlderHistoryBanner() {
+    if (!olderHistoryBanner || !olderBannerInfo) return;
+    const btn = chatContent.querySelector('[data-testid="load-older-messages-button"]');
+    if (!btn) {
+        olderHistoryBanner.style.display = 'none';
+        return;
+    }
+    const aria = btn.getAttribute('aria-label') || '';
+    const m = aria.match(/showing\s+(\d+)\s+of\s+(\d+)/i);
+    if (m) {
+        olderBannerInfo.textContent = `当前仅加载最近 ${m[1]} / 共 ${m[2]} 步`;
+    } else {
+        olderBannerInfo.textContent = '上方还有更早对话未展开';
+    }
+    olderHistoryBanner.style.display = 'flex';
+}
+
+async function handleLoadOlderClick() {
+    if (!loadOlderBtn) return;
+    haptic(10);
+    const prevHeight = chatContainer.scrollHeight;
+    const prevTop = chatContainer.scrollTop;
+    loadOlderBtn.disabled = true;
+    loadOlderBtn.textContent = '加载中...';
+    try {
+        const res = await fetchWithAuth('/load-older', { method: 'POST' });
+        const data = await res.json();
+        if (data.success) {
+            cachedHtmlHash = '';
+            await loadSnapshot(false);
+            const delta = chatContainer.scrollHeight - prevHeight;
+            if (delta > 0) {
+                isProgrammaticScroll = true;
+                clearTimeout(programmaticScrollTimer);
+                chatContainer.scrollTop = prevTop + delta;
+                programmaticScrollTimer = setTimeout(() => { isProgrammaticScroll = false; }, 150);
+            }
+            showToast('已向上展开更早消息', 'success', 1600);
+        } else {
+            showToast(data.error || '当前已无更多历史消息', 'info', 2000);
+        }
+    } catch (e) {
+        showToast('展开历史消息失败', 'error');
+    } finally {
+        loadOlderBtn.disabled = false;
+        loadOlderBtn.textContent = '⬆️ 展开更早';
+    }
+}
+
+function renderTranscriptTurns(turns) {
+    if (!transcriptList) return;
+    if (transcriptCountBadge) transcriptCountBadge.textContent = `${turns.length} 条`;
+    if (!turns || turns.length === 0) {
+        transcriptList.innerHTML = '<div class="history-state-container"><div class="history-state-title">暂无匹配的对话记录</div><div class="history-state-desc">发起新对话后，所有提问与回复都会在这里完整保留。</div></div>';
+        return;
+    }
+    transcriptList.innerHTML = turns.map((t, idx) => {
+        const roleLabel = t.role === 'user' ? `🙋 你 (#${idx + 1})` : `🤖 Antigravity (#${idx + 1})`;
+        const timeStr = t.time ? new Date(t.time).toLocaleString('zh-CN', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+        return `
+            <div class="transcript-turn-card ${t.role}">
+                <div class="transcript-turn-head">
+                    <span>${roleLabel}</span>
+                    <span class="transcript-turn-time">${escapeHtml(timeStr)}</span>
+                </div>
+                <div class="transcript-turn-body">${escapeHtml(t.text)}</div>
+            </div>
+        `;
+    }).join('');
+}
+
+async function openFullTranscript() {
+    if (!transcriptLayer || !transcriptList) return;
+    haptic(10);
+    if (transcriptSearchInput) transcriptSearchInput.value = '';
+    transcriptList.innerHTML = '<div class="history-state-container"><div class="history-spinner"></div><div class="history-state-text">正在读取本会话全部历史对话...</div></div>';
+    transcriptLayer.classList.add('show');
+    try {
+        const res = await fetchWithAuth('/current-transcript');
+        const data = await res.json();
+        cachedTranscriptTurns = data.turns || [];
+        renderTranscriptTurns(cachedTranscriptTurns);
+        requestAnimationFrame(() => {
+            transcriptList.scrollTop = transcriptList.scrollHeight;
+        });
+    } catch (e) {
+        transcriptList.innerHTML = '<div class="history-state-container"><div class="history-state-title">读取完整对话失败</div><div class="history-state-desc">请稍后重试</div></div>';
+    }
+}
+
+if (loadOlderBtn) loadOlderBtn.addEventListener('click', handleLoadOlderClick);
+if (openTranscriptFromBannerBtn) openTranscriptFromBannerBtn.addEventListener('click', openFullTranscript);
+if (fullTranscriptBtn) fullTranscriptBtn.addEventListener('click', openFullTranscript);
+if (closeTranscriptBtn && transcriptLayer) {
+    closeTranscriptBtn.addEventListener('click', () => transcriptLayer.classList.remove('show'));
+}
+if (transcriptSearchInput) {
+    transcriptSearchInput.addEventListener('input', () => {
+        const q = transcriptSearchInput.value.trim().toLowerCase();
+        if (!q) renderTranscriptTurns(cachedTranscriptTurns);
+        else renderTranscriptTurns(cachedTranscriptTurns.filter(t => t.text.toLowerCase().includes(q)));
+    });
+}
+if (transcriptTopBtn && transcriptList) {
+    transcriptTopBtn.addEventListener('click', () => { transcriptList.scrollTop = 0; });
+}
+if (transcriptBottomBtn && transcriptList) {
+    transcriptBottomBtn.addEventListener('click', () => { transcriptList.scrollTop = transcriptList.scrollHeight; });
 }
 
 // --- Init ---
