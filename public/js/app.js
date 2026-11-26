@@ -1193,7 +1193,10 @@ async function sendMessage() {
 
         if (res.ok && data.success !== false) {
             if (attachment) clearAttachment();
-            showToast(attachment ? '图片已发送至桌面端' : '指令已发送至桌面端', 'success', 1500);
+            const sentMsg = attachment
+                ? (data.autoSent === false ? '图片已附加到桌面输入框，请输入文字后发送' : '图片已发送至桌面端')
+                : '指令已发送至桌面端';
+            showToast(sentMsg, 'success', attachment && data.autoSent === false ? 2400 : 1500);
             userIsScrolling = false;
             userScrollLockUntil = 0;
             scrollToBottomBtn.classList.remove('show');
@@ -2250,8 +2253,11 @@ if (gitDiffBtn) {
 
 // --- Init ---
 document.addEventListener('visibilitychange', () => {
-    if (!document.hidden && pendingSnapshotUpdate) {
+    if (!document.hidden) {
         pendingSnapshotUpdate = false;
+        if (!ws || ws.readyState === WebSocket.CLOSED) {
+            connectWebSocket();
+        }
         loadSnapshot();
         fetchAppState();
         refreshGitBadge();

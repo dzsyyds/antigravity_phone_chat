@@ -46,6 +46,7 @@ let cachedModels = null;
 let cachedModelsAt = 0;
 let cachedQuota = null;
 let cachedQuotaAt = 0;
+let isUiMenuBusy = false;
 
 // Kill any existing process on the server port (prevents EADDRINUSE)
 function killPortProcess(port) {
@@ -1563,59 +1564,74 @@ async function getAvailableModels(cdp, forceRefresh = false) {
     if (!forceRefresh && cachedModels && (now - cachedModelsAt < 60000)) {
         return { success: true, models: cachedModels, cached: true };
     }
-
-    const EXP = `(async () => {
-        try {
-            const trigger = document.querySelector('[data-testid="model-selector-trigger"], button[aria-label*="Select model"]');
-            if (!trigger) return { error: 'Model selector trigger not found' };
-
-            const currentModel = (trigger.innerText || '').trim();
-            trigger.click();
-            await new Promise(r => setTimeout(r, 350));
-
-            const menu = document.querySelector('.agy-overlay[role="menu"], [role="menu"]');
-            if (!menu) return { error: 'Model menu did not open' };
-
-            const rawItems = Array.from(menu.querySelectorAll('.agy-overlay-item, [role="menuitem"]'));
-            const models = [];
-            for (const el of rawItems) {
-                const lines = (el.innerText || '').split('\\n').map(s => s.trim()).filter(Boolean);
-                if (lines.length === 0) continue;
-                const name = lines[0];
-                if (/^(查看用量|view usage|usage)$/i.test(name)) continue;
-
-                const badge = lines.slice(1).join(' · ');
-                const disabled = el.hasAttribute('data-disabled') ||
-                                 el.getAttribute('aria-disabled') === 'true' ||
-                                 /unavailable|paid pro/i.test(badge);
-                const active = currentModel.toLowerCase().includes(name.toLowerCase()) || name.toLowerCase().includes(currentModel.toLowerCase());
-                models.push({ name, badge, disabled, active });
-            }
-
-            document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
-            return { success: true, currentModel, models };
-        } catch (err) {
-            try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); } catch (e) {}
-            return { error: err.toString() };
-        }
-    })()`;
-
-    for (const ctx of cdp.contexts) {
-        try {
-            const res = await cdp.call("Runtime.evaluate", {
-                expression: EXP,
-                returnByValue: true,
-                awaitPromise: true,
-                contextId: ctx.id
-            });
-            if (res.result?.value && res.result.value.success) {
-                cachedModels = res.result.value.models;
-                cachedModelsAt = Date.now();
-                return res.result.value;
-            }
-        } catch (e) { }
+    if (isUiMenuBusy) {
+        if (cachedModels) return { success: true, models: cachedModels, cached: true };
+        return { error: '桌面端菜单正在读取中，请稍后再试' };
     }
-    return { error: 'Failed to inspect models' };
+    isUiMenuBusy = true;
+    try {
+        const EXP = `(async () => {
+            try {
+                const trigger = document.querySelector('[data-testid="model-selector-trigger"], button[aria-label*="Select model"]');
+                if (!trigger) return { error: '未找到桌面端模型选择按钮' };
+                const aria = trigger.getAttribute('aria-label') || '';
+                if (trigger.disabled || /cannot be changed while the agent is running/i.test(aria)) {
+                    return { error: '智能体正在生成中，暂时无法读取或切换模型' };
+                }
+
+                const currentModel = (trigger.innerText || '').trim();
+                trigger.click();
+                await new Promise(r => setTimeout(r, 350));
+
+                const menu = document.querySelector('.agy-overlay[role="menu"], [role="menu"]');
+                if (!menu) return { error: '未能打开桌面端模型菜单' };
+
+                const rawItems = Array.from(menu.querySelectorAll('.agy-overlay-item, [role="menuitem"]'));
+                const models = [];
+                for (const el of rawItems) {
+                    const lines = (el.innerText || '').split('\\n').map(s => s.trim()).filter(Boolean);
+                    if (lines.length === 0) continue;
+                    const name = lines[0];
+                    if (/^(查看用量|view usage|usage)$/i.test(name)) continue;
+
+                    const badge = lines.slice(1).join(' · ');
+                    const disabled = el.hasAttribute('data-disabled') ||
+                                     el.getAttribute('aria-disabled') === 'true' ||
+                                     /unavailable|paid pro/i.test(badge);
+                    const active = currentModel.toLowerCase().includes(name.toLowerCase()) || name.toLowerCase().includes(currentModel.toLowerCase());
+                    models.push({ name, badge, disabled, active });
+                }
+
+                document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+                return { success: true, currentModel, models };
+            } catch (err) {
+                try { document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true })); } catch (e) {}
+                return { error: err.toString() };
+            }
+        })()`;
+
+        let lastErr = '';
+        for (const ctx of cdp.contexts) {
+            try {
+                const res = await cdp.call("Runtime.evaluate", {
+                    expression: EXP,
+                    returnByValue: true,
+                    awaitPromise: true,
+                    contextId: ctx.id
+                });
+                const val = res.result?.value;
+                if (val && val.success) {
+                    cachedModels = val.models;
+                    cachedModelsAt = Date.now();
+                    return val;
+                }
+                if (val?.error) lastErr = val.error;
+            } catch (e) { }
+        }
+        return { error: lastErr || '获取可用模型列表失败' };
+    } finally {
+        isUiMenuBusy = false;
+    }
 }
 
 // Parse Antigravity Usage / Quota panel text into structured groups
@@ -1665,6 +1681,12 @@ async function getModelQuota(cdp, forceRefresh = false) {
     if (!forceRefresh && cachedQuota && (now - cachedQuotaAt < 120000)) {
         return { success: true, ...cachedQuota, cached: true };
     }
+    if (isUiMenuBusy) {
+        if (cachedQuota) return { success: true, ...cachedQuota, stale: true };
+        return { success: false, busy: true, error: '桌面端菜单正在操作中，请稍后重试' };
+    }
+    isUiMenuBusy = true;
+    try {
 
     const EXP = `(async () => {
         try {
@@ -1755,10 +1777,13 @@ async function getModelQuota(cdp, forceRefresh = false) {
         } catch (e) {}
     }
 
-    if (cachedQuota) {
-        return { success: true, ...cachedQuota, stale: true, busy: !!lastRes?.busy };
+        if (cachedQuota) {
+            return { success: true, ...cachedQuota, stale: true, busy: !!lastRes?.busy };
+        }
+        return { success: false, busy: !!lastRes?.busy, error: lastRes?.error || '获取模型剩余额度失败' };
+    } finally {
+        isUiMenuBusy = false;
     }
-    return { success: false, busy: !!lastRes?.busy, error: lastRes?.error || '获取模型剩余额度失败' };
 }
 
 // Simple hash function
@@ -1817,6 +1842,7 @@ async function initCDP() {
 async function startPolling(wss) {
     let lastErrorLog = 0;
     let isConnecting = false;
+    let zeroContextCount = 0;
 
     const poll = async () => {
         if (!cdpConnection || (cdpConnection.ws && cdpConnection.ws.readyState !== WebSocket.OPEN)) {
@@ -1829,6 +1855,7 @@ async function startPolling(wss) {
                 console.log('🔄 CDP connection lost. Attempting to reconnect...');
                 cdpConnection = null;
             }
+            zeroContextCount = 0;
             try {
                 await initCDP();
                 if (cdpConnection) {
@@ -1845,6 +1872,7 @@ async function startPolling(wss) {
         try {
             const snapshot = await captureSnapshot(cdpConnection);
             if (snapshot && !snapshot.error) {
+                zeroContextCount = 0;
                 const hash = hashString(snapshot.html);
                 const cssHash = snapshot.css ? hashString(snapshot.css) : cachedCSSHash;
                 cachedCSSHash = cssHash;
@@ -1881,6 +1909,17 @@ async function startPolling(wss) {
                         console.log('   (Tip: No active execution contexts found. Try interacting with the Antigravity window)');
                     }
                     lastErrorLog = now;
+                }
+                if (cdpConnection.contexts.length === 0) {
+                    zeroContextCount++;
+                    if (zeroContextCount >= 10) {
+                        console.log('🔄 Zero CDP contexts persisted; resetting target discovery...');
+                        try { cdpConnection.ws?.close(); } catch (e) {}
+                        cdpConnection = null;
+                        zeroContextCount = 0;
+                    }
+                } else {
+                    zeroContextCount = 0;
                 }
             }
         } catch (err) {
@@ -1969,11 +2008,16 @@ async function createServer() {
             return next();
         }
 
-        // If it's an API request, return 401, otherwise redirect to login
-        if (req.xhr || req.headers.accept?.includes('json') || req.path.startsWith('/snapshot') || req.path.startsWith('/send')) {
-            res.status(401).json({ error: 'Unauthorized' });
-        } else {
+        // Only redirect top-level browser page navigations; return 401 JSON for all API calls
+        const isPageNavigation = req.method === 'GET' && (
+            req.path === '/' ||
+            req.path === '/index.html' ||
+            req.path.startsWith('/c/')
+        );
+        if (isPageNavigation && !req.xhr && !req.headers.accept?.includes('json')) {
             res.redirect('/login.html');
+        } else {
+            res.status(401).json({ error: 'Unauthorized' });
         }
     });
 
@@ -2839,8 +2883,20 @@ async function main() {
                 let diffText = '';
                 if (statusOut.startsWith('??')) {
                     const absPath = join(gitRoot, relFile);
-                    const content = fs.readFileSync(absPath, 'utf8').split(/\r?\n/).slice(0, 250);
-                    diffText = `--- /dev/null\n+++ b/${relFile}\n@@ -0,0 +1,${content.length} @@\n` + content.map(l => '+' + l).join('\n');
+                    const st = fs.existsSync(absPath) ? fs.statSync(absPath) : null;
+                    if (!st || st.isDirectory()) {
+                        diffText = '(新目录或已移除，暂不支持文本 Diff)';
+                    } else if (st.size > 512 * 1024) {
+                        diffText = `(新增文件过大：${Math.round(st.size / 1024)} KB，暂不支持全文预览)`;
+                    } else {
+                        const rawBuf = fs.readFileSync(absPath);
+                        if (rawBuf.includes(0)) {
+                            diffText = '(新增二进制文件，暂不支持文本 Diff)';
+                        } else {
+                            const content = rawBuf.toString('utf8').split(/\r?\n/).slice(0, 250);
+                            diffText = `--- /dev/null\n+++ b/${relFile}\n@@ -0,0 +1,${content.length} @@\n` + content.map(l => '+' + l).join('\n');
+                        }
+                    }
                 } else {
                     const { stdout } = await execFileAsync('git', ['-C', gitRoot, 'diff', 'HEAD', '--', relFile], { timeout: 5000, maxBuffer: 1024 * 1024 }).catch(async () => {
                         return execFileAsync('git', ['-C', gitRoot, 'diff', '--', relFile], { timeout: 5000, maxBuffer: 1024 * 1024 });
