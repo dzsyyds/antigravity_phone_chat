@@ -401,6 +401,8 @@ body {
     -webkit-overflow-scrolling: touch;
     overscroll-behavior-y: contain;
     touch-action: pan-y;
+    will-change: scroll-position;
+    backface-visibility: hidden;
 }
 
 .chat-content {

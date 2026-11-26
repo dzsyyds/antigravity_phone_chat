@@ -775,8 +775,18 @@ th, td {
 #chatContent *, #chatContent *::before, #chatContent *::after {
     backdrop-filter: none !important;
     -webkit-backdrop-filter: none !important;
+}
+
+#chatContent *:not(.loading-spinner), #chatContent *::before, #chatContent *::after {
+    transition: none !important;
+    animation: none !important;
 }`;
             styleTag.textContent = darkModeOverrides;
+        }
+
+        if (!forceBottom && userIsScrolling) {
+            pendingSnapshotUpdate = true;
+            return;
         }
 
         if (data.htmlHash && data.htmlHash === cachedHtmlHash && chatContent.querySelector('[data-testid="autoscroll-viewport"]')) {
@@ -793,23 +803,25 @@ th, td {
             patchChatHtml(data.html);
         }
 
+        const nextScrollHeight = chatContainer.scrollHeight;
+        const heightDelta = Math.abs(nextScrollHeight - scrollHeight);
+
         if (forceBottom) {
             userIsScrolling = false;
             userScrollLockUntil = 0;
             scrollToBottom(false);
         } else if (isUserScrollLocked) {
-            const scrollPercent = scrollHeight > 0 ? scrollPos / scrollHeight : 0;
-            isProgrammaticScroll = true;
-            clearTimeout(programmaticScrollTimer);
-            chatContainer.scrollTop = chatContainer.scrollHeight * scrollPercent;
-            programmaticScrollTimer = setTimeout(() => { isProgrammaticScroll = false; }, 120);
+            if (heightDelta > 2) {
+                const scrollPercent = scrollHeight > 0 ? scrollPos / scrollHeight : 0;
+                isProgrammaticScroll = true;
+                clearTimeout(programmaticScrollTimer);
+                chatContainer.scrollTop = nextScrollHeight * scrollPercent;
+                programmaticScrollTimer = setTimeout(() => { isProgrammaticScroll = false; }, 120);
+            }
         } else if (isNearBottom || scrollPos === 0) {
-            scrollToBottom(false);
-        } else {
-            isProgrammaticScroll = true;
-            clearTimeout(programmaticScrollTimer);
-            chatContainer.scrollTop = scrollPos;
-            programmaticScrollTimer = setTimeout(() => { isProgrammaticScroll = false; }, 120);
+            if (heightDelta > 2 || Math.abs(nextScrollHeight - chatContainer.scrollTop - clientHeight) > 4) {
+                scrollToBottom(false);
+            }
         }
     } catch (err) {
         console.error(err);
@@ -1322,8 +1334,7 @@ messageInput.addEventListener('input', () => {
 // --- Scroll Sync to Desktop ---
 let scrollSyncTimeout = null;
 let lastScrollSync = 0;
-const SCROLL_SYNC_DEBOUNCE = 160;
-let snapshotReloadPending = false;
+const SCROLL_SYNC_DEBOUNCE = 220;
 
 async function syncScrollToDesktop() {
     const denom = chatContainer.scrollHeight - chatContainer.clientHeight;
@@ -1335,14 +1346,6 @@ async function syncScrollToDesktop() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ scrollPercent })
         });
-
-        if (!snapshotReloadPending) {
-            snapshotReloadPending = true;
-            setTimeout(() => {
-                loadSnapshot();
-                snapshotReloadPending = false;
-            }, 300);
-        }
     } catch (e) {}
 }
 
@@ -1361,14 +1364,14 @@ chatContainer.addEventListener('scroll', () => {
     }
 
     userIsScrolling = true;
-    userScrollLockUntil = Date.now() + USER_SCROLL_LOCK_DURATION;
+    userScrollLockUntil = Date.now() + 5000;
     clearTimeout(idleTimer);
 
     const now = Date.now();
     if (now - lastScrollSync > SCROLL_SYNC_DEBOUNCE) {
         lastScrollSync = now;
         clearTimeout(scrollSyncTimeout);
-        scrollSyncTimeout = setTimeout(syncScrollToDesktop, 120);
+        scrollSyncTimeout = setTimeout(syncScrollToDesktop, 180);
     }
 
     idleTimer = setTimeout(() => {
@@ -1378,8 +1381,8 @@ chatContainer.addEventListener('scroll', () => {
             pendingSnapshotUpdate = false;
             loadSnapshot();
         }
-    }, 3500);
-});
+    }, 1100);
+}, { passive: true });
 
 scrollToBottomBtn.addEventListener('click', () => {
     haptic(10);
