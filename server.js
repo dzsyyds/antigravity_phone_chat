@@ -125,6 +125,15 @@ function getJson(url) {
     });
 }
 
+// Only allow real local Antigravity windows (exclude built-in browser web tabs like github.com)
+function isAntigravityTargetUrl(url) {
+    if (!url || typeof url !== 'string') return false;
+    if (url.startsWith('data:') || url.startsWith('devtools:') || url.startsWith('chrome-extension:')) return false;
+    return /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(url)
+        || url.includes('workbench.html')
+        || url.includes('jetski');
+}
+
 // List all discoverable Antigravity page targets across debug ports
 async function listCDPTargets() {
     const found = [];
@@ -134,7 +143,7 @@ async function listCDPTargets() {
             for (const t of list) {
                 if (t.type !== 'page' || !t.webSocketDebuggerUrl) continue;
                 const url = t.url || '';
-                if (!url || url.startsWith('data:') || url.startsWith('devtools:')) continue;
+                if (!isAntigravityTargetUrl(url)) continue;
                 found.push({
                     id: t.id,
                     port,
@@ -156,16 +165,33 @@ async function discoverCDP() {
         try {
             const list = await getJson(`http://127.0.0.1:${port}/json/list`);
 
-            // Priority 0: Antigravity 2.0 Conversation Window
-            const ag2 = list.find(t => t.type === 'page' && t.url && !t.url.startsWith('data:') && (t.title?.includes('Antigravity') || t.url?.includes('/c/')) && t.webSocketDebuggerUrl);
+            // Priority 0: Antigravity 2.0 Conversation Window (local loopback only)
+            const ag2 = list.find(t =>
+                t.type === 'page' &&
+                t.webSocketDebuggerUrl &&
+                isAntigravityTargetUrl(t.url) &&
+                (t.url.includes('/c/') || t.title?.includes('Antigravity'))
+            );
             if (ag2) {
                 console.log('Found Antigravity 2.0 target:', ag2.title);
                 currentTargetUrl = ag2.webSocketDebuggerUrl;
                 return { port, url: ag2.webSocketDebuggerUrl };
             }
 
+            // Priority 0.5: Local Antigravity Launchpad / Session Root
+            const localPage = list.find(t =>
+                t.type === 'page' &&
+                t.webSocketDebuggerUrl &&
+                /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?(\/|$)/i.test(t.url || '')
+            );
+            if (localPage) {
+                console.log('Found local Antigravity target:', localPage.title);
+                currentTargetUrl = localPage.webSocketDebuggerUrl;
+                return { port, url: localPage.webSocketDebuggerUrl };
+            }
+
             // Priority 1: Standard Workbench (The main window)
-            const workbench = list.find(t => t.url?.includes('workbench.html') || (t.title && t.title.includes('workbench')));
+            const workbench = list.find(t => t.url?.includes('workbench.html') || (isAntigravityTargetUrl(t.url) && t.title?.includes('workbench')));
             if (workbench && workbench.webSocketDebuggerUrl) {
                 console.log('Found Workbench target:', workbench.title);
                 currentTargetUrl = workbench.webSocketDebuggerUrl;
@@ -173,7 +199,7 @@ async function discoverCDP() {
             }
 
             // Priority 2: Jetski/Launchpad (Fallback)
-            const jetski = list.find(t => t.url?.includes('jetski') || t.title === 'Launchpad');
+            const jetski = list.find(t => t.url?.includes('jetski') || (isAntigravityTargetUrl(t.url) && t.title === 'Launchpad'));
             if (jetski && jetski.webSocketDebuggerUrl) {
                 console.log('Found Jetski/Launchpad target:', jetski.title);
                 currentTargetUrl = jetski.webSocketDebuggerUrl;
@@ -2523,10 +2549,12 @@ async function main() {
                     });
                     if (r.result?.value) {
                         const info = JSON.parse(r.result.value);
-                        if (info.origin && info.origin.startsWith('http')) origin = info.origin;
-                        const params = new URLSearchParams(info.search || '');
-                        if (params.get('project')) projectQuery = 'project=' + encodeURIComponent(params.get('project'));
-                        break;
+                        if (info.origin && /^https?:\/\/(127\.0\.0\.1|localhost)(:\d+)?$/i.test(info.origin)) {
+                            origin = info.origin;
+                            const params = new URLSearchParams(info.search || '');
+                            if (params.get('project')) projectQuery = 'project=' + encodeURIComponent(params.get('project'));
+                            break;
+                        }
                     }
                 } catch (e) {}
             }
