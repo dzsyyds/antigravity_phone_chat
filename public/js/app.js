@@ -223,6 +223,7 @@ async function fetchAppState() {
             triggerMobileAlert('AI 生成已完成', data.chatTitle || '可查看最新回复', 'success');
             refreshGitBadge();
             fetchQuotaSummary(true);
+            if (typeof handleLiveAgentFinished === 'function') handleLiveAgentFinished();
         }
         prevIsBusy = nextBusy;
         isAgentBusy = nextBusy;
@@ -235,6 +236,7 @@ async function fetchAppState() {
         }
         prevPendingCount = actions.length;
         renderPendingActions(actions, data.pendingPrompt || '');
+        if (typeof syncLiveControlsState === 'function') syncLiveControlsState(nextBusy, actions, data.pendingPrompt || '');
     } catch (e) {
         console.error('[SYNC] Failed to sync state', e);
     } finally {
@@ -2317,8 +2319,581 @@ if (gitDiffBtn) {
     });
 }
 
+// --- Voice Dictation & Gemini Live Style Real-Time Conversation ---
+const voiceBtn = document.getElementById('voiceBtn');
+const liveVoiceBtn = document.getElementById('liveVoiceBtn');
+const liveOverlay = document.getElementById('liveOverlay');
+const liveCloseBtn = document.getElementById('liveCloseBtn');
+const liveSpeakBtn = document.getElementById('liveSpeakBtn');
+const liveOrb = document.getElementById('liveOrb');
+const liveStateBadge = document.getElementById('liveStateBadge');
+const liveUserText = document.getElementById('liveUserText');
+const liveReplyText = document.getElementById('liveReplyText');
+const livePendingBox = document.getElementById('livePendingBox');
+const liveMicToggleBtn = document.getElementById('liveMicToggleBtn');
+const liveSendNowBtn = document.getElementById('liveSendNowBtn');
+const liveStopBtn = document.getElementById('liveStopBtn');
+
+const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition || null;
+let hasGeminiSTT = false;
+let isDictating = false;
+let dictationRec = null;
+let dictationPrefix = '';
+let mediaRecorder = null;
+let mediaStream = null;
+let audioChunks = [];
+let recordTargetMode = 'dictate';
+
+let isLiveActive = false;
+let livePhase = 'idle'; // 'idle' | 'listening' | 'thinking' | 'speaking' | 'paused'
+let liveSpeakEnabled = localStorage.getItem('ag_live_speak') !== 'false';
+let liveRec = null;
+let liveBufferFinal = '';
+let liveBufferInterim = '';
+let liveSilenceTimer = null;
+let liveWaitingReply = false;
+
+(async function checkVoiceCapabilities() {
+    try {
+        const res = await fetchWithAuth('/voice-capabilities');
+        const data = await res.json();
+        hasGeminiSTT = !!data.hasGeminiSTT;
+    } catch (e) {}
+})();
+
+function extractLatestAssistantSpeech() {
+    const responses = chatContent.querySelectorAll('[data-testid="agent-response"]');
+    const latest = responses.length ? responses[responses.length - 1] : null;
+    if (!latest) return '';
+    const textBlocks = latest.querySelectorAll('[data-testid="planner-response-text"] [data-markdown-root], [data-markdown-root]');
+    const target = textBlocks.length ? textBlocks[textBlocks.length - 1] : latest;
+    const clone = target.cloneNode(true);
+    clone.querySelectorAll('.sr-only, .mobile-code-toolbar, pre, svg, button').forEach(el => el.remove());
+    let text = (clone.innerText || clone.textContent || '')
+        .replace(/`([^`]+)`/g, '$1')
+        .replace(/https?:\/\/\S+/g, '链接')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!text) return '已完成处理，包含代码或命令详情，请在屏幕查看。';
+    if (text.length > 360) text = text.slice(0, 360) + '。其余细节请在屏幕上查看。';
+    return text;
+}
+
+function stopMediaRecorderIfAny() {
+    try {
+        if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+            mediaRecorder.stop();
+        }
+    } catch (e) {}
+    if (mediaStream) {
+        mediaStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
+        mediaStream = null;
+    }
+}
+
+async function startCloudAudioRecording(mode = 'dictate') {
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+        showToast('当前浏览器不支持录音，请使用手机输入法自带语音按钮', 'info', 2800);
+        return false;
+    }
+    try {
+        recordTargetMode = mode;
+        audioChunks = [];
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const preferredTypes = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg'];
+        const mimeType = preferredTypes.find(t => MediaRecorder.isTypeSupported?.(t)) || '';
+        mediaRecorder = mimeType ? new MediaRecorder(mediaStream, { mimeType }) : new MediaRecorder(mediaStream);
+        mediaRecorder.ondataavailable = (ev) => {
+            if (ev.data && ev.data.size > 0) audioChunks.push(ev.data);
+        };
+        mediaRecorder.onstop = async () => {
+            const chunks = audioChunks.slice();
+            audioChunks = [];
+            if (mediaStream) {
+                mediaStream.getTracks().forEach(t => { try { t.stop(); } catch (e) {} });
+                mediaStream = null;
+            }
+            if (!chunks.length) return;
+            const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || 'audio/webm' });
+            const reader = new FileReader();
+            reader.onloadend = async () => {
+                try {
+                    showToast('正在转写语音...', 'info', 1400);
+                    const res = await fetchWithAuth('/transcribe-audio', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ dataBase64: reader.result, mimeType: blob.type || 'audio/webm' })
+                    });
+                    const data = await res.json();
+                    if (data.success && data.text) {
+                        if (recordTargetMode === 'live' && isLiveActive) {
+                            liveBufferFinal = data.text;
+                            liveBufferInterim = '';
+                            sendLiveTranscriptNow();
+                        } else {
+                            messageInput.value = (messageInput.value ? messageInput.value.trimEnd() + ' ' : '') + data.text;
+                            resizeTextarea();
+                            saveDraft();
+                            messageInput.focus();
+                        }
+                    } else {
+                        showToast(data.error || '语音转写失败', 'error', 2400);
+                    }
+                } catch (e) {
+                    showToast('语音上传识别失败', 'error');
+                }
+            };
+            reader.readAsDataURL(blob);
+        };
+        mediaRecorder.start();
+        return true;
+    } catch (err) {
+        showToast('无法使用麦克风，请在手机浏览器设置中允许麦克风权限', 'error', 2800);
+        return false;
+    }
+}
+
+function stopDictation() {
+    isDictating = false;
+    if (voiceBtn) voiceBtn.classList.remove('recording');
+    if (dictationRec) {
+        try { dictationRec.stop(); } catch (e) {}
+        dictationRec = null;
+    }
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        stopMediaRecorderIfAny();
+    }
+}
+
+async function toggleDictation() {
+    haptic(12);
+    if (isDictating) {
+        stopDictation();
+        return;
+    }
+    if (isLiveActive) {
+        showToast('正在 Live 语音模式中，请先退出后再使用输入框听写', 'info');
+        return;
+    }
+    if (!SpeechRec) {
+        if (hasGeminiSTT) {
+            const ok = await startCloudAudioRecording('dictate');
+            if (ok) {
+                isDictating = true;
+                if (voiceBtn) voiceBtn.classList.add('recording');
+                showToast('🎙️ 正在录音，说完再点一次麦克风转写', 'info', 2600);
+            }
+        } else {
+            showToast('当前手机浏览器不支持内置语音识别，可直接点击手机输入法上的麦克风，或在 .env 配置 GEMINI_API_KEY', 'info', 3400);
+            messageInput.focus();
+        }
+        return;
+    }
+
+    try {
+        const rec = new SpeechRec();
+        rec.lang = 'zh-CN';
+        rec.continuous = true;
+        rec.interimResults = true;
+        dictationPrefix = messageInput.value ? messageInput.value.trimEnd() + ' ' : '';
+        let committedText = '';
+
+        rec.onresult = (event) => {
+            let interim = '';
+            let addedFinal = '';
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                const seg = event.results[i][0]?.transcript || '';
+                if (event.results[i].isFinal) addedFinal += seg;
+                else interim += seg;
+            }
+            if (addedFinal) committedText += addedFinal;
+            messageInput.value = dictationPrefix + committedText + interim;
+            resizeTextarea();
+            saveDraft();
+        };
+
+        rec.onerror = async (ev) => {
+            const code = ev?.error || '';
+            stopDictation();
+            if (code === 'not-allowed' || code === 'permission-denied') {
+                showToast('请先在浏览器中允许麦克风权限', 'error', 2600);
+            } else if ((code === 'service-not-allowed' || code === 'network' || code === 'audio-capture') && hasGeminiSTT) {
+                showToast('浏览器语音引擎不可用，自动切换为录音识别...', 'info', 1800);
+                const ok = await startCloudAudioRecording('dictate');
+                if (ok) {
+                    isDictating = true;
+                    if (voiceBtn) voiceBtn.classList.add('recording');
+                }
+            } else if (code && code !== 'aborted' && code !== 'no-speech') {
+                showToast('浏览器语音引擎暂不可用，建议使用输入法自带语音按钮', 'info', 2800);
+            }
+        };
+
+        rec.onend = () => {
+            if (isDictating) {
+                isDictating = false;
+                if (voiceBtn) voiceBtn.classList.remove('recording');
+                dictationRec = null;
+            }
+        };
+
+        dictationRec = rec;
+        isDictating = true;
+        if (voiceBtn) voiceBtn.classList.add('recording');
+        rec.start();
+        showToast('🎙️ 正在聆听，请直接说话...', 'info', 1800);
+    } catch (err) {
+        stopDictation();
+        showToast('无法启动语音识别，请检查麦克风权限', 'error');
+    }
+}
+
+if (voiceBtn) {
+    voiceBtn.addEventListener('click', toggleDictation);
+}
+
+// --- Gemini Live Style Real-Time Voice Mode ---
+function applyLiveSpeakUI() {
+    if (!liveSpeakBtn) return;
+    liveSpeakBtn.textContent = liveSpeakEnabled ? '🔊 播报:开' : '🔇 静音';
+}
+applyLiveSpeakUI();
+
+function setLivePhase(phase, statusLabel) {
+    livePhase = phase;
+    if (liveOrb) {
+        liveOrb.classList.remove('listening', 'thinking', 'speaking', 'paused');
+        liveOrb.classList.add(phase === 'idle' ? 'paused' : phase);
+    }
+    if (liveStateBadge && statusLabel) {
+        liveStateBadge.textContent = statusLabel;
+    }
+    if (liveMicToggleBtn) {
+        if (phase === 'listening') liveMicToggleBtn.textContent = '⏸️ 暂停聆听';
+        else if (phase === 'speaking') liveMicToggleBtn.textContent = '🎙️ 打断说话';
+        else if (phase === 'paused') liveMicToggleBtn.textContent = '🎙️ 继续说话';
+        else liveMicToggleBtn.textContent = '🎙️ 准备说话';
+    }
+}
+
+function stopLiveRecognition() {
+    clearTimeout(liveSilenceTimer);
+    liveSilenceTimer = null;
+    if (liveRec) {
+        try { liveRec.onend = null; liveRec.stop(); } catch (e) {}
+        liveRec = null;
+    }
+    if (mediaRecorder && recordTargetMode === 'live' && mediaRecorder.state !== 'inactive') {
+        stopMediaRecorderIfAny();
+    }
+}
+
+function stopLiveSpeech() {
+    try {
+        if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+    } catch (e) {}
+}
+
+function startLiveListening() {
+    if (!isLiveActive) return;
+    stopLiveSpeech();
+    stopLiveRecognition();
+
+    if (!SpeechRec) {
+        if (hasGeminiSTT) {
+            setLivePhase('listening', '🎙️ 录音聆听中，说完点「立即发送」');
+            startCloudAudioRecording('live').then(ok => {
+                if (!ok) setLivePhase('paused', '麦克风未授权，请开启权限后点击圆形按钮重试');
+                else if (liveSendNowBtn) liveSendNowBtn.disabled = false;
+            });
+        } else {
+            setLivePhase('paused', '当前浏览器不支持免手实时识别，请点击手机输入法语音或在 .env 配 GEMINI_API_KEY');
+        }
+        return;
+    }
+
+    try {
+        const rec = new SpeechRec();
+        rec.lang = 'zh-CN';
+        rec.continuous = true;
+        rec.interimResults = true;
+        liveBufferFinal = '';
+        liveBufferInterim = '';
+        if (liveSendNowBtn) liveSendNowBtn.disabled = true;
+
+        rec.onresult = (event) => {
+            if (!isLiveActive || livePhase !== 'listening') return;
+            let interim = '';
+            let added = '';
+            for (let i = event.resultIndex; i < event.results.length; i++) {
+                const seg = event.results[i][0]?.transcript || '';
+                if (event.results[i].isFinal) added += seg;
+                else interim += seg;
+            }
+            if (added) liveBufferFinal += added;
+            liveBufferInterim = interim;
+            const combined = (liveBufferFinal + liveBufferInterim).trim();
+            if (liveUserText && combined) {
+                liveUserText.textContent = `你说：${combined}`;
+            }
+            if (liveSendNowBtn) liveSendNowBtn.disabled = !combined;
+
+            clearTimeout(liveSilenceTimer);
+            if (combined) {
+                liveSilenceTimer = setTimeout(() => {
+                    if (isLiveActive && livePhase === 'listening') {
+                        sendLiveTranscriptNow();
+                    }
+                }, 1350);
+            }
+        };
+
+        rec.onerror = (ev) => {
+            const code = ev?.error || '';
+            if (code === 'not-allowed' || code === 'permission-denied') {
+                setLivePhase('paused', '麦克风权限被拒绝，请在浏览器开启后点光环继续');
+            } else if ((code === 'service-not-allowed' || code === 'network') && hasGeminiSTT) {
+                stopLiveRecognition();
+                setLivePhase('listening', '🎙️ 已切换录音模式，说完点「立即发送」');
+                startCloudAudioRecording('live');
+                if (liveSendNowBtn) liveSendNowBtn.disabled = false;
+            }
+        };
+
+        rec.onend = () => {
+            if (isLiveActive && livePhase === 'listening') {
+                const combined = (liveBufferFinal + liveBufferInterim).trim();
+                if (combined) {
+                    sendLiveTranscriptNow();
+                } else {
+                    setTimeout(() => {
+                        if (isLiveActive && livePhase === 'listening') startLiveListening();
+                    }, 220);
+                }
+            }
+        };
+
+        liveRec = rec;
+        setLivePhase('listening', '正在聆听，说完停顿自动发送...');
+        rec.start();
+    } catch (e) {
+        setLivePhase('paused', '语音识别启动失败，点击中央光环重试');
+    }
+}
+
+async function sendLiveTranscriptNow() {
+    if (!isLiveActive) return;
+    if (!SpeechRec && hasGeminiSTT && mediaRecorder && mediaRecorder.state === 'recording') {
+        stopLiveRecognition();
+        return;
+    }
+    const text = (liveBufferFinal + liveBufferInterim).trim();
+    liveBufferFinal = '';
+    liveBufferInterim = '';
+    if (liveSendNowBtn) liveSendNowBtn.disabled = true;
+    if (!text) return;
+
+    stopLiveRecognition();
+    setLivePhase('thinking', '已发送给电脑端，Antigravity 正在思考执行...');
+    if (liveUserText) liveUserText.textContent = `你说：${text}`;
+    if (liveReplyText) liveReplyText.textContent = '等待桌面端生成结果...';
+    liveWaitingReply = true;
+
+    try {
+        if (!chatIsOpen) {
+            await fetchWithAuth('/new-chat', { method: 'POST' });
+            await new Promise(r => setTimeout(r, 700));
+            chatIsOpen = true;
+        }
+        const res = await fetchWithAuth('/send', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ message: text })
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || data.success === false) {
+            liveWaitingReply = false;
+            const errMsg = data.details?.reason === 'busy'
+                ? '智能体上一轮仍在生成中，请稍候或先点「停止生成」'
+                : (data.error || '发送失败，请重试');
+            setLivePhase('paused', errMsg);
+            return;
+        }
+        setTimeout(() => loadSnapshot(true), 350);
+        setTimeout(fetchAppState, 700);
+    } catch (e) {
+        liveWaitingReply = false;
+        setLivePhase('paused', '网络异常，点击中央光环重新说话');
+    }
+}
+
+function speakLiveReply(text) {
+    if (!isLiveActive) return;
+    if (liveReplyText) liveReplyText.textContent = `Antigravity：${text}`;
+
+    if (!liveSpeakEnabled || !('speechSynthesis' in window)) {
+        setLivePhase('listening', '回复已同步，可继续说话...');
+        setTimeout(() => { if (isLiveActive) startLiveListening(); }, 500);
+        return;
+    }
+
+    stopLiveSpeech();
+    stopLiveRecognition();
+    setLivePhase('speaking', '正在语音播报回复（点击光环可随时打断）...');
+    try {
+        const utter = new SpeechSynthesisUtterance(text);
+        utter.lang = 'zh-CN';
+        utter.rate = 1.06;
+        utter.onend = () => {
+            if (isLiveActive && livePhase === 'speaking') {
+                startLiveListening();
+            }
+        };
+        utter.onerror = () => {
+            if (isLiveActive && livePhase === 'speaking') {
+                startLiveListening();
+            }
+        };
+        window.speechSynthesis.speak(utter);
+    } catch (e) {
+        startLiveListening();
+    }
+}
+
+function handleLiveAgentFinished() {
+    if (!isLiveActive) return;
+    liveWaitingReply = false;
+    setTimeout(async () => {
+        await loadSnapshot(true);
+        if (!isLiveActive) return;
+        const summary = extractLatestAssistantSpeech();
+        if (summary) speakLiveReply(summary);
+        else startLiveListening();
+    }, 350);
+}
+
+function syncLiveControlsState(busy, actions, promptText) {
+    if (!isLiveActive) return;
+    if (liveStopBtn) liveStopBtn.style.display = busy ? 'inline-flex' : 'none';
+    if (busy && liveWaitingReply && livePhase !== 'thinking') {
+        setLivePhase('thinking', '电脑端正在执行，请稍候...');
+    }
+    if (!livePendingBox) return;
+    if (!actions || actions.length === 0) {
+        livePendingBox.style.display = 'none';
+        livePendingBox.innerHTML = '';
+        return;
+    }
+    livePendingBox.style.display = 'flex';
+    livePendingBox.innerHTML = `<div class="live-sub-row user">${escapeHtml(promptText ? '需要确认：' + promptText : '桌面端等待权限确认')}</div><div class="live-pending-btns"></div>`;
+    const btnWrap = livePendingBox.querySelector('.live-pending-btns');
+    actions.forEach(action => {
+        const b = document.createElement('button');
+        b.className = `pending-action-btn ${action.kind === 'reject' ? 'reject' : 'approve'}`;
+        b.textContent = action.text;
+        b.addEventListener('click', async () => {
+            haptic(15);
+            b.disabled = true;
+            await fetchWithAuth('/remote-click', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    selector: action.selector || 'button, [role="button"]',
+                    index: action.index || 0,
+                    textContent: action.text,
+                    scope: action.scope || 'auto'
+                })
+            }).catch(() => {});
+            setTimeout(fetchAppState, 600);
+        });
+        btnWrap.appendChild(b);
+    });
+}
+
+function openLiveMode() {
+    if (!liveOverlay) return;
+    if (isDictating) stopDictation();
+    isLiveActive = true;
+    liveWaitingReply = false;
+    liveOverlay.classList.add('show');
+    liveOverlay.setAttribute('aria-hidden', 'false');
+    if (liveVoiceBtn) liveVoiceBtn.classList.add('active');
+    if (liveUserText) liveUserText.textContent = '等待你的语音指令...';
+    if (liveReplyText) liveReplyText.textContent = liveSpeakEnabled
+        ? 'Live 已连接电脑端：说话停顿自动发送，回复后自动语音播报。'
+        : 'Live 已开启（静音模式）：说话停顿自动发送，回复结果直接看屏幕字幕。';
+    syncLiveControlsState(isAgentBusy, [], '');
+    startLiveListening();
+}
+
+function closeLiveMode() {
+    isLiveActive = false;
+    liveWaitingReply = false;
+    stopLiveRecognition();
+    stopLiveSpeech();
+    if (liveOverlay) {
+        liveOverlay.classList.remove('show');
+        liveOverlay.setAttribute('aria-hidden', 'true');
+    }
+    if (liveVoiceBtn) liveVoiceBtn.classList.remove('active');
+    setLivePhase('idle', '');
+}
+
+if (liveVoiceBtn) liveVoiceBtn.addEventListener('click', () => { haptic(12); openLiveMode(); });
+if (liveCloseBtn) liveCloseBtn.addEventListener('click', () => { haptic(10); closeLiveMode(); });
+if (liveSpeakBtn) {
+    liveSpeakBtn.addEventListener('click', () => {
+        haptic(8);
+        liveSpeakEnabled = !liveSpeakEnabled;
+        try { localStorage.setItem('ag_live_speak', String(liveSpeakEnabled)); } catch (e) {}
+        applyLiveSpeakUI();
+        if (!liveSpeakEnabled) stopLiveSpeech();
+        showToast(liveSpeakEnabled ? '已开启 Live 语音播报' : '已切换为 Live 静音文字模式', 'info', 1600);
+    });
+}
+if (liveOrb) {
+    liveOrb.addEventListener('click', () => {
+        haptic(12);
+        if (livePhase === 'listening') {
+            stopLiveRecognition();
+            setLivePhase('paused', '已暂停聆听，点击中央光环继续');
+        } else {
+            startLiveListening();
+        }
+    });
+}
+if (liveMicToggleBtn) {
+    liveMicToggleBtn.addEventListener('click', () => {
+        haptic(10);
+        if (livePhase === 'listening') {
+            stopLiveRecognition();
+            setLivePhase('paused', '已暂停聆听，点击继续说话');
+        } else {
+            startLiveListening();
+        }
+    });
+}
+if (liveSendNowBtn) liveSendNowBtn.addEventListener('click', () => { haptic(12); sendLiveTranscriptNow(); });
+if (liveStopBtn) {
+    liveStopBtn.addEventListener('click', async () => {
+        haptic(18);
+        await fetchWithAuth('/stop', { method: 'POST' }).catch(() => {});
+        liveWaitingReply = false;
+        setTimeout(() => { if (isLiveActive) startLiveListening(); }, 400);
+    });
+}
+
 // --- Init ---
 document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+        if (isDictating) stopDictation();
+        if (isLiveActive) {
+            stopLiveRecognition();
+            stopLiveSpeech();
+            setLivePhase('paused', '切到后台已暂停聆听，点击光环继续');
+        }
+        return;
+    }
     if (!document.hidden) {
         pendingSnapshotUpdate = false;
         if (!ws || ws.readyState === WebSocket.CLOSED) {

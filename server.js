@@ -2892,6 +2892,60 @@ async function main() {
             }
         });
 
+        // Voice input / optional Gemini STT capabilities
+        app.get('/voice-capabilities', (req, res) => {
+            const hasGeminiKey = Boolean((process.env.GEMINI_API_KEY || '').trim());
+            res.json({ success: true, hasGeminiSTT: hasGeminiKey });
+        });
+
+        // Optional audio transcription via Gemini API (fallback when mobile browser lacks built-in SpeechRecognition)
+        app.post('/transcribe-audio', async (req, res) => {
+            const apiKey = (process.env.GEMINI_API_KEY || '').trim();
+            if (!apiKey) {
+                return res.status(400).json({ success: false, needsConfig: true, error: '未配置 GEMINI_API_KEY' });
+            }
+            const { dataBase64, mimeType } = req.body || {};
+            if (!dataBase64 || typeof dataBase64 !== 'string') {
+                return res.status(400).json({ success: false, error: '缺少音频数据' });
+            }
+            const cleanMime = String(mimeType || 'audio/webm').split(';')[0].trim().toLowerCase();
+            if (!cleanMime.startsWith('audio/')) {
+                return res.status(400).json({ success: false, error: '不支持的音频格式' });
+            }
+            const cleanB64 = dataBase64.replace(/^data:audio\/[a-z0-9+.-]+(?:;[^,]+)?;base64,/i, '');
+            const buf = Buffer.from(cleanB64, 'base64');
+            if (!buf.length || buf.length > 10 * 1024 * 1024) {
+                return res.status(400).json({ success: false, error: '音频无效或超过 10MB 上限' });
+            }
+
+            try {
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+                const resp = await fetch(apiUrl, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contents: [{
+                            parts: [
+                                { text: '请逐字准确转写这段语音（支持中英文混说与代码术语），只输出转写后的纯文本，不要添加任何解释或前缀。' },
+                                { inline_data: { mime_type: cleanMime, data: cleanB64 } }
+                            ]
+                        }]
+                    })
+                });
+                const json = await resp.json().catch(() => ({}));
+                if (!resp.ok) {
+                    return res.status(502).json({ success: false, error: json.error?.message || 'Gemini 语音识别接口请求失败' });
+                }
+                const text = (json.candidates?.[0]?.content?.parts || [])
+                    .map(p => p.text || '')
+                    .join('')
+                    .trim();
+                return res.json({ success: true, text });
+            } catch (err) {
+                return res.status(500).json({ success: false, error: '语音识别异常: ' + err.message });
+            }
+        });
+
         // Resolve active Git repository root for workspace diff inspection
         async function resolveGitRoot() {
             const candidates = [

@@ -10,7 +10,7 @@
     <title>Antigravity 掌上控制台</title>
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" type="image/svg+xml" href="/icon.svg">
-    <link rel="stylesheet" href="css/style.css?v=0.4.4">
+    <link rel="stylesheet" href="css/style.css?v=0.4.5">
     <!-- Security: Content Security Policy -->
     <meta http-equiv="Content-Security-Policy"
         content="default-src 'self' https://fonts.googleapis.com https://fonts.gstatic.com; img-src 'self' data: https:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self' 'unsafe-inline';">
@@ -124,6 +124,16 @@
             </svg>
             <span id="notifyText">提醒:关</span>
         </button>
+        <button class="setting-chip live-chip" id="liveVoiceBtn" title="开启仿 Gemini Live 实时语音对话模式">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                <path d="M4 10v4"></path>
+                <path d="M8 6v12"></path>
+                <path d="M12 3v18"></path>
+                <path d="M16 6v12"></path>
+                <path d="M20 10v4"></path>
+            </svg>
+            <span id="liveVoiceText">Live</span>
+        </button>
         <div class="setting-chip sync-stats" id="syncStats">
             <span id="statsText">流式同步</span>
         </div>
@@ -208,6 +218,14 @@
                         <line x1="6" y1="6" x2="18" y2="18"></line>
                     </svg>
                 </button>
+                <button class="voice-btn" id="voiceBtn" type="button" aria-label="语音输入" title="语音转文字输入">
+                    <svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round">
+                        <rect x="9" y="2" width="6" height="12" rx="3"></rect>
+                        <path d="M5 10v2a7 7 0 0 0 14 0v-2"></path>
+                        <line x1="12" y1="19" x2="12" y2="22"></line>
+                        <line x1="8" y1="22" x2="16" y2="22"></line>
+                    </svg>
+                </button>
                 <button class="send-btn" id="sendBtn" type="button" aria-label="发送指令" title="发送">
                     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
                         <line x1="22" y1="2" x2="11" y2="13"></line>
@@ -277,7 +295,40 @@
         </div>
     </div>
 
-    <script src="js/app.js?v=0.4.4"></script>
+    <!-- Gemini Live 风格实时语音对话浮层 -->
+    <div class="live-overlay" id="liveOverlay" aria-hidden="true">
+        <div class="live-topbar">
+            <div class="live-brand">
+                <span class="live-dot"></span>
+                <span>Antigravity Live</span>
+            </div>
+            <div class="live-top-actions">
+                <button class="live-pill-btn" id="liveSpeakBtn" type="button" title="图书馆无耳机时可关闭语音播报">🔊 播报:开</button>
+                <button class="live-close-btn" id="liveCloseBtn" type="button" aria-label="退出 Live 模式">✕</button>
+            </div>
+        </div>
+
+        <div class="live-stage">
+            <button class="live-orb listening" id="liveOrb" type="button" aria-label="点击说话或打断">
+                <span class="live-orb-ring"></span>
+                <span class="live-orb-core"></span>
+            </button>
+            <div class="live-state-badge" id="liveStateBadge">正在聆听，请直接说话...</div>
+            <div class="live-subtitles" id="liveTranscriptBox">
+                <div class="live-sub-row user" id="liveUserText">等待你的语音指令...</div>
+                <div class="live-sub-row assistant" id="liveReplyText">说完停顿约 1.3 秒自动发送给电脑端执行；回复完成后会自动播报或显示摘要。</div>
+            </div>
+            <div class="live-pending-box" id="livePendingBox" style="display: none;"></div>
+        </div>
+
+        <div class="live-controls">
+            <button class="live-ctrl-btn primary" id="liveMicToggleBtn" type="button">🎙️ 暂停聆听</button>
+            <button class="live-ctrl-btn" id="liveSendNowBtn" type="button" disabled>📤 立即发送</button>
+            <button class="live-ctrl-btn danger" id="liveStopBtn" type="button" style="display: none;">⏹️ 停止生成</button>
+        </div>
+    </div>
+
+    <script src="js/app.js?v=0.4.5"></script>
 </body>
 
 </html>
