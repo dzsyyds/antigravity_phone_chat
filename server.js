@@ -3146,7 +3146,8 @@ async function main() {
         // Start server
         const localIP = getLocalIP();
         const protocol = hasSSL ? 'https' : 'http';
-        server.listen(SERVER_PORT, '0.0.0.0', () => {
+        // Bind dual-stack (::) so both IPv4 (10.x / 127.0.0.1) and IPv6 (::1 / localhost) tunnels like cpolar succeed
+        server.listen(SERVER_PORT, () => {
             console.log(`🚀 Server running on ${protocol}://${localIP}:${SERVER_PORT}`);
             if (hasSSL) {
                 console.log(`💡 First time on phone? Accept the security warning to proceed.`);
