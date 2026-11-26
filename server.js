@@ -2107,7 +2107,14 @@ async function createServer() {
         }
     });
 
-    app.use(express.static(join(__dirname, 'public')));
+    app.use(express.static(join(__dirname, 'public'), {
+        etag: false,
+        setHeaders: (res, filePath) => {
+            if (/\.(html|js|css)$/i.test(filePath)) {
+                res.setHeader('Cache-Control', 'no-store, must-revalidate');
+            }
+        }
+    }));
 
     // Login endpoint
     app.post('/login', (req, res) => {

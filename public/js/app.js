@@ -242,13 +242,22 @@ async function fetchAppState() {
     }
 }
 
+let lastPendingSignature = '';
+
 function renderPendingActions(actions, pendingPrompt = '') {
     if (!pendingActionsBar || !pendingActionsBtns) return;
     if (!actions || actions.length === 0) {
-        pendingActionsBar.style.display = 'none';
-        pendingActionsBtns.innerHTML = '';
+        if (lastPendingSignature !== '') {
+            lastPendingSignature = '';
+            pendingActionsBar.style.display = 'none';
+            pendingActionsBtns.innerHTML = '';
+        }
         return;
     }
+
+    const sig = JSON.stringify({ p: pendingPrompt, a: actions.map(a => [a.text, a.kind, a.scope, a.index]) });
+    if (sig === lastPendingSignature) return;
+    lastPendingSignature = sig;
 
     const promptEl = document.getElementById('pendingPromptText');
     if (promptEl) {
@@ -498,13 +507,6 @@ async function loadSnapshot(forceBottom = false) {
     }
     isLoadingSnapshot = true;
     try {
-        const icon = refreshBtn.querySelector('svg');
-        if (icon) {
-            icon.classList.remove('spin-anim');
-            void icon.offsetWidth;
-            icon.classList.add('spin-anim');
-        }
-
         const hasStyleTag = !!document.getElementById('cdp-styles');
         const params = new URLSearchParams();
         if (cachedCssHash && hasStyleTag) params.set('cssHash', cachedCssHash);
@@ -1288,6 +1290,12 @@ if (clearInputBtn) {
 
 refreshBtn.addEventListener('click', () => {
     haptic(10);
+    const icon = refreshBtn.querySelector('svg');
+    if (icon) {
+        icon.classList.remove('spin-anim');
+        void icon.offsetWidth;
+        icon.classList.add('spin-anim');
+    }
     cachedCssHash = '';
     cachedHtmlHash = '';
     loadSnapshot(true);
@@ -1331,30 +1339,13 @@ messageInput.addEventListener('input', () => {
     saveDraft();
 });
 
-// --- Scroll Sync to Desktop ---
-let scrollSyncTimeout = null;
-let lastScrollSync = 0;
-const SCROLL_SYNC_DEBOUNCE = 220;
-
-async function syncScrollToDesktop() {
-    const denom = chatContainer.scrollHeight - chatContainer.clientHeight;
-    if (denom <= 0) return;
-    const scrollPercent = chatContainer.scrollTop / denom;
-    try {
-        await fetchWithAuth('/remote-scroll', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ scrollPercent })
-        });
-    } catch (e) {}
-}
-
+// --- Scroll Handling (Zero-Flicker Native Mobile Momentum) ---
 chatContainer.addEventListener('scroll', () => {
     const isNearBottom = chatContainer.scrollHeight - chatContainer.scrollTop - chatContainer.clientHeight < 120;
     if (isNearBottom) {
-        scrollToBottomBtn.classList.remove('show');
+        if (scrollToBottomBtn.classList.contains('show')) scrollToBottomBtn.classList.remove('show');
         userScrollLockUntil = 0;
-    } else {
+    } else if (!scrollToBottomBtn.classList.contains('show')) {
         scrollToBottomBtn.classList.add('show');
     }
 
@@ -1366,13 +1357,6 @@ chatContainer.addEventListener('scroll', () => {
     userIsScrolling = true;
     userScrollLockUntil = Date.now() + 5000;
     clearTimeout(idleTimer);
-
-    const now = Date.now();
-    if (now - lastScrollSync > SCROLL_SYNC_DEBOUNCE) {
-        lastScrollSync = now;
-        clearTimeout(scrollSyncTimeout);
-        scrollSyncTimeout = setTimeout(syncScrollToDesktop, 180);
-    }
 
     idleTimer = setTimeout(() => {
         userIsScrolling = false;
@@ -1769,6 +1753,11 @@ function updateFabOffset() {
     }
 }
 
+let lastAppliedVh = -1;
+let lastAppliedVTop = -1;
+let lastAppliedKbOpen = null;
+let viewportSyncRaf = 0;
+
 function syncVisualViewport() {
     const vv = window.visualViewport;
     const rawH = vv ? vv.height : window.innerHeight;
@@ -1788,9 +1777,23 @@ function syncVisualViewport() {
     const heightDrop = baseViewportHeight - vh;
     const isKbOpen = isTextFocused && heightDrop > 110;
 
-    document.documentElement.style.setProperty('--app-height', vh + 'px');
-    document.documentElement.style.setProperty('--vv-top', vTop + 'px');
-    document.body.classList.toggle('keyboard-open', isKbOpen);
+    // Skip expensive :root style writes and layout recalculations if viewport metrics didn't actually change
+    if (vh === lastAppliedVh && vTop === lastAppliedVTop && isKbOpen === lastAppliedKbOpen) {
+        return;
+    }
+
+    if (vh !== lastAppliedVh) {
+        lastAppliedVh = vh;
+        document.documentElement.style.setProperty('--app-height', vh + 'px');
+    }
+    if (vTop !== lastAppliedVTop) {
+        lastAppliedVTop = vTop;
+        document.documentElement.style.setProperty('--vv-top', vTop + 'px');
+    }
+    if (isKbOpen !== lastAppliedKbOpen) {
+        lastAppliedKbOpen = isKbOpen;
+        document.body.classList.toggle('keyboard-open', isKbOpen);
+    }
     lastViewportChangeAt = Date.now();
 
     // Only reset window layout scroll when keyboard is closed and visualViewport is at top
@@ -1815,6 +1818,14 @@ function syncVisualViewport() {
     }
 }
 
+function scheduleViewportSyncRaf() {
+    if (viewportSyncRaf) return;
+    viewportSyncRaf = requestAnimationFrame(() => {
+        viewportSyncRaf = 0;
+        syncVisualViewport();
+    });
+}
+
 function scheduleKeyboardSyncs() {
     keyboardSyncTimers.forEach(clearTimeout);
     keyboardSyncTimers = [
@@ -1825,10 +1836,10 @@ function scheduleKeyboardSyncs() {
 }
 
 if (window.visualViewport) {
-    window.visualViewport.addEventListener('resize', syncVisualViewport);
-    window.visualViewport.addEventListener('scroll', syncVisualViewport);
+    window.visualViewport.addEventListener('resize', scheduleViewportSyncRaf);
+    window.visualViewport.addEventListener('scroll', scheduleViewportSyncRaf);
 }
-window.addEventListener('resize', syncVisualViewport);
+window.addEventListener('resize', scheduleViewportSyncRaf);
 
 messageInput.addEventListener('focus', scheduleKeyboardSyncs);
 messageInput.addEventListener('blur', () => {
