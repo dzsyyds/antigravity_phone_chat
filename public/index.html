@@ -159,7 +159,7 @@
     <div class="pending-actions-bar" id="pendingActionsBar" style="display: none;">
         <div class="pending-label">
             <span class="pending-pulse"></span>
-            <span>等待远程确认</span>
+            <span id="pendingPromptText">等待远程确认</span>
         </div>
         <div class="pending-btns" id="pendingActionsBtns"></div>
     </div>
@@ -193,7 +193,7 @@
         <!-- 悬浮输入框 -->
         <div class="input-section">
             <div class="input-wrapper">
-                <input type="file" id="imageFileInput" accept="image/*" hidden>
+                <input type="file" id="imageFileInput" class="visually-hidden-file-input" accept="image/*">
                 <button class="attach-btn" id="attachImgBtn" type="button" aria-label="发送图片" title="上传手机图片或截图">
                     <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                         <rect x="3" y="3" width="18" height="18" rx="3" ry="3"></rect>

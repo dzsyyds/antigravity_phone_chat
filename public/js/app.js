@@ -231,10 +231,10 @@ async function fetchAppState() {
         // Pending Approval Action Bar & Alert
         const actions = data.pendingActions || [];
         if (actions.length > 0 && prevPendingCount === 0) {
-            triggerMobileAlert('需要手机审批确认', actions.map(a => a.text).join(' / '), 'info');
+            triggerMobileAlert('需要手机审批确认', data.pendingPrompt || actions.map(a => a.text).join(' / '), 'info');
         }
         prevPendingCount = actions.length;
-        renderPendingActions(actions);
+        renderPendingActions(actions, data.pendingPrompt || '');
     } catch (e) {
         console.error('[SYNC] Failed to sync state', e);
     } finally {
@@ -242,12 +242,17 @@ async function fetchAppState() {
     }
 }
 
-function renderPendingActions(actions) {
+function renderPendingActions(actions, pendingPrompt = '') {
     if (!pendingActionsBar || !pendingActionsBtns) return;
     if (!actions || actions.length === 0) {
         pendingActionsBar.style.display = 'none';
         pendingActionsBtns.innerHTML = '';
         return;
+    }
+
+    const promptEl = document.getElementById('pendingPromptText');
+    if (promptEl) {
+        promptEl.textContent = pendingPrompt ? `等待确认：${pendingPrompt}` : '等待远程确认';
     }
 
     pendingActionsBar.style.display = 'flex';
@@ -261,20 +266,30 @@ function renderPendingActions(actions) {
             btn.disabled = true;
             btn.style.opacity = '0.6';
             try {
-                await fetchWithAuth('/remote-click', {
+                const rcRes = await fetchWithAuth('/remote-click', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        selector: action.selector || 'button',
+                        selector: action.selector || 'button, [role="button"]',
                         index: action.index || 0,
-                        textContent: action.text
+                        textContent: action.text,
+                        scope: action.scope || 'auto'
                     })
                 });
-                showToast(`已执行：${action.text}`, 'success');
+                const rcData = await rcRes.json().catch(() => ({}));
+                if (rcData.success) {
+                    showToast(`已执行：${action.text}`, 'success');
+                } else {
+                    showToast(rcData.error || '未能点击该按钮，请稍后重试', 'error');
+                    btn.disabled = false;
+                    btn.style.opacity = '1';
+                }
                 setTimeout(loadSnapshot, 400);
                 setTimeout(fetchAppState, 700);
             } catch (err) {
                 showToast('远程点击失败', 'error');
+                btn.disabled = false;
+                btn.style.opacity = '1';
             }
         });
         pendingActionsBtns.appendChild(btn);
@@ -1112,7 +1127,12 @@ function compressImageFile(file) {
 if (attachImgBtn && imageFileInput) {
     attachImgBtn.addEventListener('click', () => {
         haptic(8);
-        imageFileInput.click();
+        try {
+            imageFileInput.value = '';
+            imageFileInput.click();
+        } catch (err) {
+            showToast('无法调起手机相册，请在浏览器或系统设置中允许文件/照片访问权限', 'error', 2800);
+        }
     });
     imageFileInput.addEventListener('change', async () => {
         const file = imageFileInput.files?.[0];
@@ -1132,7 +1152,10 @@ if (attachImgBtn && imageFileInput) {
             if (attachmentPreview) attachmentPreview.style.display = 'flex';
             if (typeof updateFabOffset === 'function') updateFabOffset();
         } catch (err) {
-            showToast('图片处理失败，请重试', 'error');
+            const msg = /permission|notallowed|notreadable|denied/i.test(String(err?.message || err))
+                ? '缺少手机相册/文件读取权限，请在系统设置开启后重试'
+                : '图片读取失败，请重新选择或检查相册权限';
+            showToast(msg, 'error', 2600);
         }
     });
 }
@@ -1236,7 +1259,7 @@ async function sendMessage() {
 }
 
 // Keep soft keyboard steady (prevent blur/re-open flash) when tapping input toolbar buttons
-[sendBtn, clearInputBtn, enterModeBtn, attachImgBtn, removeAttachmentBtn, ...document.querySelectorAll('.insert-chip')].forEach(el => {
+[sendBtn, clearInputBtn, enterModeBtn, removeAttachmentBtn, ...document.querySelectorAll('.insert-chip')].forEach(el => {
     if (el) el.addEventListener('mousedown', (e) => e.preventDefault());
 });
 
@@ -1922,16 +1945,22 @@ chatContainer.addEventListener('click', async (e) => {
             const btnIndex = matchingButtons.indexOf(btn);
 
             try {
-                await fetchWithAuth('/remote-click', {
+                const rcRes = await fetchWithAuth('/remote-click', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
-                        selector: btn.tagName.toLowerCase() === 'button' ? 'button' : '[role="button"]',
+                        selector: 'button, [role="button"]',
                         index: btnIndex >= 0 ? btnIndex : 0,
-                        textContent: matchedKeyword
+                        textContent: matchedKeyword,
+                        scope: 'auto'
                     })
                 });
-                showToast(`已触发：${btnText.substring(0, 14)}`, 'success', 1400);
+                const rcData = await rcRes.json().catch(() => ({}));
+                if (rcData.success) {
+                    showToast(`已触发：${btnText.substring(0, 14)}`, 'success', 1400);
+                } else {
+                    showToast(rcData.error || '远程操作失败，请刷新确认', 'error', 2000);
+                }
                 setTimeout(loadSnapshot, 400);
                 setTimeout(loadSnapshot, 1000);
                 setTimeout(fetchAppState, 1200);

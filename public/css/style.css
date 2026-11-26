@@ -511,6 +511,22 @@ body {
     color: #c7d2fe;
 }
 
+.pending-prompt-text {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.visually-hidden-file-input {
+    position: fixed;
+    left: -9999px;
+    top: 0;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+}
+
 .pending-pulse {
     width: 8px;
     height: 8px;

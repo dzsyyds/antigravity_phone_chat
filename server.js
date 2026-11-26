@@ -822,39 +822,75 @@ async function stopGeneration(cdp) {
     return { error: 'Context failed' };
 }
 
-// Click Element (Remote)
-async function clickElement(cdp, { selector, index, textContent }) {
+// Click Element (Remote) - supports chat viewport, floating permission dialogs, and trusted CDP mouse clicks
+async function clickElement(cdp, { selector, index, textContent, scope }) {
+    const safeSelector = JSON.stringify(selector || 'button, [role="button"]');
     const safeText = JSON.stringify(textContent || '');
+    const safeScope = JSON.stringify(scope || 'auto');
 
-    const EXP = `(async () => {
+    const LOCATE_EXP = `(async () => {
         try {
-            const root = document.querySelector('[data-testid="autoscroll-viewport"]') || document.getElementById('conversation') || document.getElementById('chat') || document.getElementById('cascade') || document;
-            
-            let elements = Array.from(root.querySelectorAll('${selector}'));
-            
+            const sel = ${safeSelector};
+            const scopeMode = ${safeScope};
             const filterText = ${safeText};
+
+            const collectVisible = (container) => {
+                if (!container) return [];
+                return Array.from(container.querySelectorAll(sel)).filter(el =>
+                    el.offsetParent !== null &&
+                    !el.disabled &&
+                    el.getAttribute('aria-disabled') !== 'true' &&
+                    !el.closest('[data-testid="input-cancel-button"], [data-tooltip-id="input-send-button-cancel-tooltip"]')
+                );
+            };
+
+            let pool = [];
+            if (scopeMode === 'dialog') {
+                const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"], .agy-overlay'));
+                for (const d of dialogs) pool.push(...collectVisible(d));
+            }
+            if (pool.length === 0) {
+                const chatRoot = document.querySelector('[data-testid="autoscroll-viewport"]') || document.getElementById('conversation') || document.getElementById('chat') || document.getElementById('cascade');
+                pool = collectVisible(chatRoot);
+            }
+            if (pool.length === 0 || scopeMode === 'page') {
+                const seen = new Set(pool);
+                for (const el of collectVisible(document)) {
+                    if (!seen.has(el)) { seen.add(el); pool.push(el); }
+                }
+            }
+
+            let elements = pool;
             if (filterText) {
                 elements = elements.filter(el => {
-                    const txt = (el.innerText || el.textContent || '').trim();
+                    const txt = (el.innerText || el.textContent || '').trim().replace(/\\s+/g, ' ');
                     const firstLine = txt.split('\\n')[0].trim();
-                    return firstLine === filterText || txt.includes(filterText);
+                    return firstLine === filterText || txt === filterText || txt.toLowerCase().includes(filterText.toLowerCase());
                 });
-                
-                elements = elements.filter(el => {
-                    return !elements.some(other => other !== el && el.contains(other));
-                });
+                elements = elements.filter(el => !elements.some(other => other !== el && el.contains(other)));
             }
 
-            const target = elements[${index}];
+            const target = elements[${Number.isInteger(index) ? index : 0}] || elements[elements.length - 1];
+            if (!target) {
+                return { error: 'Element not found among ' + elements.length + ' visible matches' };
+            }
 
-            if (target) {
+            target.scrollIntoView({ block: 'center', inline: 'nearest' });
+            await new Promise(r => setTimeout(r, 40));
+            const rect = target.getBoundingClientRect();
+            const hasBox = rect.width > 2 && rect.height > 2 && rect.bottom > 0 && rect.right > 0;
+            if (!hasBox) {
                 if (target.focus) target.focus();
                 target.click();
-                return { success: true, found: elements.length, indexUsed: ${index} };
+                return { success: true, method: 'dom_click', found: elements.length };
             }
-            
-            return { error: 'Element not found at index ' + ${index} + ' among ' + elements.length + ' matches' };
-        } catch(e) {
+            return {
+                located: true,
+                x: Math.round(rect.left + rect.width / 2),
+                y: Math.round(rect.top + rect.height / 2),
+                found: elements.length
+            };
+        } catch (e) {
             return { error: e.toString() };
         }
     })()`;
@@ -862,15 +898,23 @@ async function clickElement(cdp, { selector, index, textContent }) {
     for (const ctx of cdp.contexts) {
         try {
             const res = await cdp.call("Runtime.evaluate", {
-                expression: EXP,
+                expression: LOCATE_EXP,
                 returnByValue: true,
                 awaitPromise: true,
                 contextId: ctx.id
             });
-            if (res.result?.value?.success) return res.result.value;
+            const val = res.result?.value;
+            if (!val) continue;
+            if (val.success) return val;
+            if (val.located && typeof val.x === 'number' && typeof val.y === 'number') {
+                await cdp.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: val.x, y: val.y, button: "none" }).catch(() => {});
+                await cdp.call("Input.dispatchMouseEvent", { type: "mousePressed", x: val.x, y: val.y, button: "left", clickCount: 1 });
+                await cdp.call("Input.dispatchMouseEvent", { type: "mouseReleased", x: val.x, y: val.y, button: "left", clickCount: 1 });
+                return { success: true, method: 'cdp_mouse', x: val.x, y: val.y, found: val.found };
+            }
         } catch (e) { }
     }
-    return { error: 'Click failed in all contexts or element not found at index' };
+    return { error: '远程点击未找到匹配按钮，请刷新后重试' };
 }
 
 // Remote scroll - sync phone scroll to desktop
@@ -1510,35 +1554,77 @@ async function getAppState(cdp) {
             state.chatTitle = parts.length > 1 ? parts[0].trim() : rawTitle;
         }
 
-        // 5. Detect pending approval / interactive action buttons inside chat viewport
+        // 5. Detect pending approval / permission prompts across viewport, composer, and floating dialogs
+        const approveRegex = /^(运行|允许|总是允许|仅允许一次|允许本次对话|允许此网站|允许访问|授权|确认|同意|接受|全部接受|应用|继续|批准|提交|重试|run|run command|allow|always allow|allow once|allow this conversation|allow for this chat|allow access|allow site|grant|confirm|accept|accept all|apply|approve|continue|proceed|yes|retry)(\s*\([^)]{1,14}\))?$/i;
+        const rejectRegex = /^(拒绝|不允许|拒绝本次|跳过|丢弃|放弃|deny|reject|decline|don't allow|skip|discard|cancel)(\s*\([^)]{1,14}\))?$/i;
+
+        const collectVisibleBtns = (root) => {
+            if (!root) return [];
+            return Array.from(root.querySelectorAll('button, [role="button"]')).filter(btn =>
+                btn.offsetParent !== null &&
+                !btn.disabled &&
+                btn.getAttribute('aria-disabled') !== 'true' &&
+                !btn.closest('[data-testid="input-cancel-button"], [data-tooltip-id="input-send-button-cancel-tooltip"], [data-testid="send-button"], [data-testid="model-selector-trigger"], [data-testid="permissions-selector-trigger"]')
+            );
+        };
+
+        const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [role="alertdialog"], .agy-overlay'));
         const viewport = document.querySelector('[data-testid="autoscroll-viewport"]') || document.getElementById('conversation') || document.body;
-        if (viewport) {
-            const approveRegex = /^(运行|允许|总是允许|仅允许一次|允许本次对话|确认|接受|应用|run|allow|always allow|allow once|allow this conversation|confirm|accept|apply)$/i;
-            const rejectRegex = /^(拒绝|丢弃|取消|deny|reject|discard)$/i;
-            const allBtns = Array.from(viewport.querySelectorAll('button, [role="button"]'));
-            const matched = [];
-            allBtns.forEach((btn) => {
-                if (btn.offsetParent === null || btn.disabled) return;
-                const txt = (btn.innerText || '').trim().replace(/\\s+/g, ' ');
-                if (!txt || txt.length > 26) return;
-                if (approveRegex.test(txt)) {
-                    matched.push({ text: txt, kind: 'approve' });
-                } else if (rejectRegex.test(txt)) {
-                    matched.push({ text: txt, kind: 'reject' });
+        const composer = document.querySelector('.surface-composer, .surface-composer-card');
+
+        const scanPool = [];
+        const seenBtns = new Set();
+        const addFrom = (root, scopeName) => {
+            for (const btn of collectVisibleBtns(root)) {
+                if (seenBtns.has(btn)) continue;
+                seenBtns.add(btn);
+                scanPool.push({ btn, scopeName });
+            }
+        };
+        dialogs.forEach(d => addFrom(d, 'dialog'));
+        addFrom(composer, 'page');
+        addFrom(viewport, 'page');
+
+        const matched = [];
+        scanPool.forEach(({ btn, scopeName }) => {
+            const txt = (btn.innerText || btn.textContent || '').trim().replace(/\\s+/g, ' ');
+            if (!txt || txt.length > 32) return;
+            if (approveRegex.test(txt)) {
+                matched.push({ btn, text: txt, kind: 'approve', scope: scopeName });
+            } else if (rejectRegex.test(txt)) {
+                matched.push({ btn, text: txt, kind: 'reject', scope: scopeName });
+            }
+        });
+
+        const tail = matched.slice(-4);
+        if (tail.length > 0) {
+            const anchorBtn = tail[0].btn;
+            const promptContainer = anchorBtn.closest('[role="dialog"], [role="alertdialog"], .agy-overlay, section, form, div');
+            if (promptContainer) {
+                const rawPrompt = (promptContainer.innerText || '').replace(/\\s+/g, ' ').trim();
+                const cleaned = rawPrompt.slice(0, 80);
+                if (cleaned && cleaned.length > tail[0].text.length) {
+                    state.pendingPrompt = cleaned;
                 }
-            });
-            // Keep only the latest cluster (max 4 buttons) and compute occurrence index for exact click matching
-            const tail = matched.slice(-4);
-            state.pendingActions = tail.map(item => {
-                const sameTextBtns = allBtns.filter(b => (b.innerText || '').trim().replace(/\\s+/g, ' ').includes(item.text));
-                return {
-                    text: item.text,
-                    kind: item.kind,
-                    selector: 'button',
-                    index: Math.max(0, sameTextBtns.length - 1)
-                };
-            });
+            }
         }
+        state.pendingActions = tail.map(item => {
+            const sameScopeBtns = scanPool
+                .filter(p => p.scopeName === item.scope)
+                .map(p => p.btn)
+                .filter(b => {
+                    const t = (b.innerText || b.textContent || '').trim().replace(/\\s+/g, ' ');
+                    return t === item.text || t.toLowerCase().includes(item.text.toLowerCase());
+                });
+            const idx = sameScopeBtns.indexOf(item.btn);
+            return {
+                text: item.text,
+                kind: item.kind,
+                scope: item.scope,
+                selector: 'button, [role="button"]',
+                index: idx >= 0 ? idx : Math.max(0, sameScopeBtns.length - 1)
+            };
+        });
 
         return state;
     } catch (e) { return { mode: '极速 (Turbo)', model: 'Unknown', isBusy: false, chatTitle: '', pendingActions: [], error: e.toString() }; }
@@ -2454,9 +2540,9 @@ async function main() {
 
         // Remote Click
         app.post('/remote-click', async (req, res) => {
-            const { selector, index, textContent } = req.body;
-            if (!cdpConnection) return res.status(503).json({ error: 'CDP disconnected' });
-            const result = await clickElement(cdpConnection, { selector, index, textContent });
+            const { selector, index, textContent, scope } = req.body;
+            if (!cdpConnection) return res.status(503).json({ error: '桌面端 CDP 未连接' });
+            const result = await clickElement(cdpConnection, { selector, index, textContent, scope });
             res.json(result);
         });
 
