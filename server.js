@@ -549,10 +549,11 @@ async function captureSnapshot(cdp) {
                 }
             } catch (e) { }
         }
-        // Extract inline CSS custom properties from <html> and <body> (critical for Antigravity 2.0 dark theme variables)
-        const htmlInlineStyle = document.documentElement.getAttribute('style') || '';
-        const bodyInlineStyle = document.body?.getAttribute('style') || '';
-        const rootVarsRule = ':root, html, body { ' + htmlInlineStyle + '; ' + bodyInlineStyle + '; }';
+        // Extract only CSS custom properties (--*) from <html> and <body> (avoids volatile inline cursor/style flips triggering CSS re-injection)
+        const extractCssVars = (rawStyle) => (String(rawStyle || '').match(/--[a-zA-Z0-9_-]+\s*:[^;]+/g) || []).join('; ');
+        const htmlVars = extractCssVars(document.documentElement.getAttribute('style'));
+        const bodyVars = extractCssVars(document.body?.getAttribute('style'));
+        const rootVarsRule = ':root, html, body { ' + htmlVars + '; ' + bodyVars + '; }';
         const allCSS = rootVarsRule + '\\n' + rules.join('\\n');
         
         return {

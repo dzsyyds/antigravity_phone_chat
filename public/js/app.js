@@ -450,6 +450,44 @@ function fastHtmlHash(str) {
     return (h >>> 0).toString(36) + '_' + str.length;
 }
 
+function patchElementChildren(liveEl, nextEl, depth = 0) {
+    const liveKids = Array.from(liveEl.children);
+    const nextKids = Array.from(nextEl.children);
+    const minLen = Math.min(liveKids.length, nextKids.length);
+
+    for (let i = 0; i < minLen; i++) {
+        const cur = liveKids[i];
+        const inc = nextKids[i];
+        const hash = fastHtmlHash(inc.outerHTML);
+        if (cur._agRawHash === hash) continue;
+
+        // Recursively patch deep containers (like active assistant turns) so earlier blocks stay mounted and scrollTop never clamps
+        if (depth < 3 && cur.tagName === inc.tagName && cur.className === inc.className && cur.children.length > 0 && inc.children.length > 0) {
+            cur._agRawHash = hash;
+            patchElementChildren(cur, inc, depth + 1);
+            continue;
+        }
+
+        const imported = document.importNode(inc, true);
+        imported._agRawHash = hash;
+        cur.replaceWith(imported);
+        addMobileCopyButtons(imported);
+    }
+
+    for (let i = minLen; i < nextKids.length; i++) {
+        const inc = nextKids[i];
+        const hash = fastHtmlHash(inc.outerHTML);
+        const imported = document.importNode(inc, true);
+        imported._agRawHash = hash;
+        liveEl.appendChild(imported);
+        addMobileCopyButtons(imported);
+    }
+
+    for (let i = liveKids.length - 1; i >= nextKids.length; i--) {
+        liveKids[i].remove();
+    }
+}
+
 function patchChatHtml(html) {
     const tpl = document.createElement('template');
     tpl.innerHTML = html;
@@ -458,32 +496,7 @@ function patchChatHtml(html) {
     const nextRoot = tpl.content.querySelector('[data-quotable-root="true"]');
 
     if (liveRoot && nextRoot) {
-        const liveKids = Array.from(liveRoot.children);
-        const nextKids = Array.from(nextRoot.children);
-        const minLen = Math.min(liveKids.length, nextKids.length);
-
-        for (let i = 0; i < minLen; i++) {
-            const incoming = nextKids[i];
-            const hash = fastHtmlHash(incoming.outerHTML);
-            if (liveKids[i]._agRawHash === hash) continue;
-            const imported = document.importNode(incoming, true);
-            imported._agRawHash = hash;
-            liveKids[i].replaceWith(imported);
-            addMobileCopyButtons(imported);
-        }
-
-        for (let i = minLen; i < nextKids.length; i++) {
-            const incoming = nextKids[i];
-            const hash = fastHtmlHash(incoming.outerHTML);
-            const imported = document.importNode(incoming, true);
-            imported._agRawHash = hash;
-            liveRoot.appendChild(imported);
-            addMobileCopyButtons(imported);
-        }
-
-        for (let i = liveKids.length - 1; i >= nextKids.length; i--) {
-            liveKids[i].remove();
-        }
+        patchElementChildren(liveRoot, nextRoot, 0);
         return;
     }
 
@@ -553,20 +566,27 @@ async function loadSnapshot(forceBottom = false) {
         const isNearBottom = scrollHeight - scrollPos - clientHeight < 120;
         const isUserScrollLocked = Date.now() < userScrollLockUntil;
 
-        // --- CSS INJECTION (Delta Cached) ---
+        // --- CSS INJECTION (Delta Cached, Base CSS & Static Mobile Overrides Separated) ---
         if (data.css) {
-            cachedCssHash = data.cssHash || cachedCssHash;
+            const nextCssHash = data.cssHash || cachedCssHash;
             let styleTag = document.getElementById('cdp-styles');
-            if (!styleTag) {
-                styleTag = document.createElement('style');
-                styleTag.id = 'cdp-styles';
-                document.head.appendChild(styleTag);
+            if (!styleTag || cachedCssHash !== nextCssHash) {
+                if (!styleTag) {
+                    styleTag = document.createElement('style');
+                    styleTag.id = 'cdp-styles';
+                    document.head.appendChild(styleTag);
+                }
+                if (styleTag.textContent !== data.css) {
+                    styleTag.textContent = data.css;
+                }
             }
+            cachedCssHash = nextCssHash;
+        }
 
-            const darkModeOverrides = `/* --- BASE SNAPSHOT CSS --- */
-${data.css}
-
-/* --- MOBILE DARK MODE OVERRIDES --- */
+        if (!document.getElementById('ag-mobile-overrides')) {
+            const overrideTag = document.createElement('style');
+            overrideTag.id = 'ag-mobile-overrides';
+            overrideTag.textContent = `/* --- MOBILE DARK MODE OVERRIDES --- */
 :root {
     --bg-app: #07070a;
     --text-main: #f8fafc;
@@ -783,7 +803,7 @@ th, td {
     transition: none !important;
     animation: none !important;
 }`;
-            styleTag.textContent = darkModeOverrides;
+            document.head.appendChild(overrideTag);
         }
 
         if (!forceBottom && userIsScrolling) {
@@ -812,17 +832,20 @@ th, td {
             userIsScrolling = false;
             userScrollLockUntil = 0;
             scrollToBottom(false);
-        } else if (isUserScrollLocked) {
-            if (heightDelta > 2) {
-                const scrollPercent = scrollHeight > 0 ? scrollPos / scrollHeight : 0;
-                isProgrammaticScroll = true;
-                clearTimeout(programmaticScrollTimer);
-                chatContainer.scrollTop = nextScrollHeight * scrollPercent;
-                programmaticScrollTimer = setTimeout(() => { isProgrammaticScroll = false; }, 120);
-            }
         } else if (isNearBottom || scrollPos === 0) {
             if (heightDelta > 2 || Math.abs(nextScrollHeight - chatContainer.scrollTop - clientHeight) > 4) {
                 scrollToBottom(false);
+            }
+        } else {
+            // User is reading earlier messages: guard against browser clamping scrollTop during DOM patch
+            const targetTop = (isUserScrollLocked && heightDelta > 2 && scrollHeight > 0)
+                ? nextScrollHeight * (scrollPos / scrollHeight)
+                : scrollPos;
+            if (Math.abs(chatContainer.scrollTop - targetTop) > 2) {
+                isProgrammaticScroll = true;
+                clearTimeout(programmaticScrollTimer);
+                chatContainer.scrollTop = targetTop;
+                programmaticScrollTimer = setTimeout(() => { isProgrammaticScroll = false; }, 120);
             }
         }
     } catch (err) {
