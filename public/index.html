@@ -4,13 +4,13 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
-    <meta name="theme-color" content="#08080a">
+    <meta name="theme-color" content="#08090e">
     <meta name="apple-mobile-web-app-capable" content="yes">
     <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
     <title>Antigravity 掌上控制台</title>
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" type="image/svg+xml" href="/icon.svg">
-    <link rel="stylesheet" href="css/style.css?v=0.5.0">
+    <link rel="stylesheet" href="css/style.css?v=0.5.1">
     <!-- Security: Content Security Policy -->
     <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline';">
@@ -149,9 +149,18 @@
 
     <!-- SSL 提示横幅 (仅 HTTP 时展示) -->
     <div class="ssl-banner" id="sslBanner" style="display: none;">
-        <span>⚠️ 正在使用明文 HTTP 传输</span>
-        <button id="enableHttpsBtn">启用 HTTPS</button>
-        <button class="dismiss-btn">×</button>
+        <span class="ssl-banner-text">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+            </svg>
+            正在使用明文 HTTP 传输
+        </span>
+        <div class="ssl-banner-actions">
+            <button id="enableHttpsBtn" type="button">启用 HTTPS</button>
+            <button class="dismiss-btn" type="button" aria-label="关闭提示">×</button>
+        </div>
     </div>
 
     <!-- 主会话滚动容器 -->
@@ -159,8 +168,8 @@
         <div class="older-history-banner" id="olderHistoryBanner" style="display: none;">
             <span class="older-banner-info" id="olderBannerInfo">当前仅显示最近片段</span>
             <div class="older-banner-actions">
-                <button type="button" class="older-banner-btn" id="loadOlderBtn">⬆️ 展开更早</button>
-                <button type="button" class="older-banner-btn primary" id="openTranscriptFromBannerBtn">📖 完整记录</button>
+                <button type="button" class="older-banner-btn" id="loadOlderBtn">展开更早</button>
+                <button type="button" class="older-banner-btn primary" id="openTranscriptFromBannerBtn">完整记录</button>
             </div>
         </div>
         <div class="chat-content" id="chatContent">
@@ -192,16 +201,16 @@
     <div class="bottom-panel" id="bottomPanel">
         <!-- 快捷指令胶囊滑动栏 -->
         <div class="quick-actions" id="quickActionsBar">
-            <button class="action-chip enter-mode-chip" id="enterModeBtn" type="button" title="切换软键盘回车行为">⏎ 回车:发送</button>
-            <button class="action-chip insert-chip" data-insert="/" type="button">／ 斜杠命令</button>
-            <button class="action-chip insert-chip" data-insert="@" type="button">＠ 引用文件</button>
-            <button class="action-chip" data-action="请继续执行下一步任务" type="button">🚀 继续执行</button>
-            <button class="action-chip" data-action="请分析并修复刚才的报错" type="button">🔧 修复报错</button>
-            <button class="action-chip" data-action="请总结当前完成情况与后续计划" type="button">📊 总结进度</button>
-            <button class="action-chip" data-action="请运行测试并验证当前修改是否全部通过" type="button">✅ 运行测试</button>
-            <button class="action-chip" data-action="请详细解释当前代码的实现原理" type="button">📖 解释代码</button>
-            <button class="action-chip" data-action="请审查代码并给出性能或结构优化建议" type="button">💡 优化建议</button>
-            <button class="action-chip" data-action="请撤销上一步操作并回滚修改" type="button">↩️ 撤回上步</button>
+            <button class="action-chip enter-mode-chip" id="enterModeBtn" type="button" title="切换软键盘回车行为">回车:发送</button>
+            <button class="action-chip insert-chip" data-insert="/" type="button">/ 命令</button>
+            <button class="action-chip insert-chip" data-insert="@" type="button">@ 文件</button>
+            <button class="action-chip" data-action="请继续执行下一步任务" type="button">继续执行</button>
+            <button class="action-chip" data-action="请分析并修复刚才的报错" type="button">修复报错</button>
+            <button class="action-chip" data-action="请总结当前完成情况与后续计划" type="button">总结进度</button>
+            <button class="action-chip" data-action="请运行测试并验证当前修改是否全部通过" type="button">运行测试</button>
+            <button class="action-chip" data-action="请详细解释当前代码的实现原理" type="button">解释代码</button>
+            <button class="action-chip" data-action="请审查代码并给出性能或结构优化建议" type="button">优化建议</button>
+            <button class="action-chip" data-action="请撤销上一步操作并回滚修改" type="button">撤回上步</button>
         </div>
 
         <!-- 图片待发送预览条 -->
@@ -225,7 +234,7 @@
                         <polyline points="21 15 16 10 5 21"></polyline>
                     </svg>
                 </button>
-                <textarea id="messageInput" placeholder="给 Antigravity 发消息... (回车发送)" rows="1" enterkeyhint="send" autocomplete="off" autocapitalize="sentences" spellcheck="false"></textarea>
+                <textarea id="messageInput" placeholder="给 Antigravity 发消息..." rows="1" enterkeyhint="send" autocomplete="off" autocapitalize="sentences" spellcheck="false"></textarea>
                 <button class="clear-input-btn" id="clearInputBtn" type="button" aria-label="清空输入" title="清空" style="display: none;">
                     <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
                         <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -329,8 +338,8 @@
                 <input type="search" id="transcriptSearchInput" placeholder="搜索本会话历史提问或回复...">
             </div>
             <div class="transcript-jump-bar">
-                <button type="button" class="transcript-jump-btn" id="transcriptTopBtn">⬆️ 回到第 1 句</button>
-                <button type="button" class="transcript-jump-btn" id="transcriptBottomBtn">⬇️ 跳到最新</button>
+                <button type="button" class="transcript-jump-btn" id="transcriptTopBtn">回到第 1 句</button>
+                <button type="button" class="transcript-jump-btn" id="transcriptBottomBtn">跳到最新</button>
             </div>
         </div>
         <div class="history-content" id="transcriptList"></div>
@@ -344,15 +353,35 @@
                 <span>Antigravity Live</span>
             </div>
             <div class="live-top-actions">
-                <button class="live-pill-btn" id="liveSpeakBtn" type="button" title="图书馆无耳机时可关闭语音播报">🔊 播报:开</button>
-                <button class="live-close-btn" id="liveCloseBtn" type="button" aria-label="退出 Live 模式">✕</button>
+                <button class="live-pill-btn" id="liveSpeakBtn" type="button" title="图书馆无耳机时可关闭语音播报">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                        <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+                        <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+                    </svg>
+                    <span>播报:开</span>
+                </button>
+                <button class="live-close-btn" id="liveCloseBtn" type="button" aria-label="退出 Live 模式">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+                        <line x1="18" y1="6" x2="6" y2="18"></line>
+                        <line x1="6" y1="6" x2="18" y2="18"></line>
+                    </svg>
+                </button>
             </div>
         </div>
 
         <div class="live-stage">
             <button class="live-orb listening" id="liveOrb" type="button" aria-label="点击说话或打断">
                 <span class="live-orb-ring"></span>
-                <span class="live-orb-core"></span>
+                <span class="live-orb-ring-outer"></span>
+                <span class="live-orb-core">
+                    <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <path d="M4 10v4"></path>
+                        <path d="M8 6v12"></path>
+                        <path d="M12 3v18"></path>
+                        <path d="M16 6v12"></path>
+                        <path d="M20 10v4"></path>
+                    </svg>
+                </span>
             </button>
             <div class="live-state-badge" id="liveStateBadge">正在聆听，请直接说话...</div>
             <div class="live-subtitles" id="liveTranscriptBox">
@@ -363,13 +392,24 @@
         </div>
 
         <div class="live-controls">
-            <button class="live-ctrl-btn primary" id="liveMicToggleBtn" type="button">🎙️ 暂停聆听</button>
-            <button class="live-ctrl-btn" id="liveSendNowBtn" type="button" disabled>📤 立即发送</button>
-            <button class="live-ctrl-btn danger" id="liveStopBtn" type="button" style="display: none;">⏹️ 停止生成</button>
+            <button class="live-ctrl-btn primary" id="liveMicToggleBtn" type="button">暂停聆听</button>
+            <button class="live-ctrl-btn" id="liveSendNowBtn" type="button" disabled>
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                    <line x1="22" y1="2" x2="11" y2="13"></line>
+                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                </svg>
+                <span>立即发送</span>
+            </button>
+            <button class="live-ctrl-btn danger" id="liveStopBtn" type="button" style="display: none;">
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="5" y="5" width="14" height="14" rx="2.5"></rect>
+                </svg>
+                <span>停止生成</span>
+            </button>
         </div>
     </div>
 
-    <script src="js/app.js?v=0.5.0"></script>
+    <script src="js/app.js?v=0.5.1"></script>
 </body>
 
 </html>

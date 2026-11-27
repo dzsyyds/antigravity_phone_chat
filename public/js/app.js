@@ -1090,13 +1090,13 @@ let enterToSend = localStorage.getItem(ENTER_MODE_KEY) !== 'false';
 
 function applyEnterModeUI() {
     if (enterModeBtn) {
-        enterModeBtn.textContent = enterToSend ? '⏎ 回车:发送' : '⏎ 回车:换行';
+        enterModeBtn.textContent = enterToSend ? '回车:发送' : '回车:换行';
         enterModeBtn.classList.toggle('active', !enterToSend);
     }
     messageInput.setAttribute('enterkeyhint', enterToSend ? 'send' : 'enter');
     messageInput.placeholder = enterToSend
-        ? '给 Antigravity 发消息... (回车发送)'
-        : '给 Antigravity 发消息... (点右侧发送)';
+        ? '给 Antigravity 发消息...'
+        : '输入指令，点右侧发送...';
 }
 
 function resizeTextarea() {
@@ -2180,7 +2180,7 @@ async function openQuotaModal(forceRefresh = false) {
         let html = `
             <div class="quota-meta-bar">
                 <span>${escapeHtml(statusLabel)}</span>
-                <button class="quota-refresh-btn" id="refreshQuotaBtn" type="button">🔄 立即刷新</button>
+                <button class="quota-refresh-btn" id="refreshQuotaBtn" type="button">立即刷新</button>
             </div>
         `;
 
@@ -2599,9 +2599,15 @@ if (voiceBtn) {
 }
 
 // --- Gemini Live Style Real-Time Voice Mode ---
+const LIVE_ICON_MIC = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2" width="6" height="12" rx="3"></rect><path d="M5 10v2a7 7 0 0 0 14 0v-2"></path><line x1="12" y1="19" x2="12" y2="22"></line></svg>';
+const LIVE_ICON_PAUSE = '<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"></rect><rect x="14" y="5" width="4" height="14" rx="1"></rect></svg>';
+const LIVE_ICON_SPK_ON = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>';
+const LIVE_ICON_SPK_OFF = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>';
+
 function applyLiveSpeakUI() {
     if (!liveSpeakBtn) return;
-    liveSpeakBtn.textContent = liveSpeakEnabled ? '🔊 播报:开' : '🔇 静音';
+    liveSpeakBtn.innerHTML = (liveSpeakEnabled ? LIVE_ICON_SPK_ON : LIVE_ICON_SPK_OFF)
+        + `<span>${liveSpeakEnabled ? '播报:开' : '静音'}</span>`;
 }
 applyLiveSpeakUI();
 
@@ -2615,10 +2621,10 @@ function setLivePhase(phase, statusLabel) {
         liveStateBadge.textContent = statusLabel;
     }
     if (liveMicToggleBtn) {
-        if (phase === 'listening') liveMicToggleBtn.textContent = '⏸️ 暂停聆听';
-        else if (phase === 'speaking') liveMicToggleBtn.textContent = '🎙️ 打断说话';
-        else if (phase === 'paused') liveMicToggleBtn.textContent = '🎙️ 继续说话';
-        else liveMicToggleBtn.textContent = '🎙️ 准备说话';
+        if (phase === 'listening') liveMicToggleBtn.innerHTML = `${LIVE_ICON_PAUSE}<span>暂停聆听</span>`;
+        else if (phase === 'speaking') liveMicToggleBtn.innerHTML = `${LIVE_ICON_MIC}<span>打断说话</span>`;
+        else if (phase === 'paused') liveMicToggleBtn.innerHTML = `${LIVE_ICON_MIC}<span>继续说话</span>`;
+        else liveMicToggleBtn.innerHTML = `${LIVE_ICON_MIC}<span>准备说话</span>`;
     }
 }
 
