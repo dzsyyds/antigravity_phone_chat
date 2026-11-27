@@ -2584,7 +2584,23 @@ async function createServer() {
 
         console.log('📱 Client connected (Authenticated)');
 
+        const keepAlive = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+                try { ws.ping(); } catch (e) {}
+            }
+        }, 25000);
+
+        ws.on('message', (raw) => {
+            try {
+                const msg = JSON.parse(raw);
+                if (msg && msg.type === 'ping' && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'pong', t: Date.now() }));
+                }
+            } catch (e) {}
+        });
+
         ws.on('close', () => {
+            clearInterval(keepAlive);
             console.log('📱 Client disconnected');
         });
     });

@@ -109,6 +109,8 @@ function showToast(message, type = 'info', duration = 2400) {
     }, duration);
 }
 
+let lastHttpOkAt = 0;
+
 // --- Auth Utilities ---
 async function fetchWithAuth(url, options = {}) {
     if (!options.headers) options.headers = {};
@@ -118,6 +120,9 @@ async function fetchWithAuth(url, options = {}) {
     if (res.status === 401) {
         window.location.href = '/login.html';
         return new Promise(() => {});
+    }
+    if (res.ok) {
+        lastHttpOkAt = Date.now();
     }
     return res;
 }
@@ -392,14 +397,34 @@ function scheduleSnapshotLoad(forceBottom = false) {
     }
 }
 
+let wsReconnectTimer = null;
+let wsHeartbeatTimer = null;
+
 function connectWebSocket() {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+        return;
+    }
+    clearTimeout(wsReconnectTimer);
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    ws = new WebSocket(`${protocol}//${window.location.host}`);
+    try {
+        ws = new WebSocket(`${protocol}//${window.location.host}`);
+    } catch (err) {
+        wsConnected = false;
+        updateConnectionVisual();
+        wsReconnectTimer = setTimeout(connectWebSocket, 4000);
+        return;
+    }
 
     ws.onopen = () => {
         wsConnected = true;
         updateConnectionVisual();
         loadSnapshot(true);
+        clearInterval(wsHeartbeatTimer);
+        wsHeartbeatTimer = setInterval(() => {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                try { ws.send(JSON.stringify({ type: 'ping' })); } catch (e) {}
+            }
+        }, 25000);
     };
 
     ws.onmessage = (event) => {
@@ -417,15 +442,22 @@ function connectWebSocket() {
         }
     };
 
-    ws.onclose = () => {
+    ws.onerror = () => {
         wsConnected = false;
         updateConnectionVisual();
-        setTimeout(connectWebSocket, 2000);
+    };
+
+    ws.onclose = () => {
+        wsConnected = false;
+        clearInterval(wsHeartbeatTimer);
+        updateConnectionVisual();
+        wsReconnectTimer = setTimeout(connectWebSocket, 2500);
     };
 }
 
 function updateConnectionVisual() {
-    if (!wsConnected) {
+    const httpHealthy = (Date.now() - lastHttpOkAt) < 10000;
+    if (!wsConnected && !httpHealthy) {
         statusDot.className = 'status-dot disconnected';
         statusBadge.classList.remove('busy');
         statusText.textContent = '重连中';
@@ -441,7 +473,7 @@ function updateConnectionVisual() {
     } else {
         statusDot.className = 'status-dot connected';
         statusBadge.classList.remove('busy');
-        statusText.textContent = '实时同步';
+        statusText.textContent = wsConnected ? '实时同步' : '在线同步';
         if (stopBtn) stopBtn.classList.remove('is-active');
     }
 }
@@ -3069,9 +3101,15 @@ document.addEventListener('visibilitychange', () => {
 });
 
 connectWebSocket();
+loadSnapshot(true);
 fetchAppState();
 fetchQuotaSummary(false);
 setInterval(fetchAppState, 4000);
+setInterval(() => {
+    if (!wsConnected && autoRefreshEnabled && !document.hidden && !userIsScrolling) {
+        scheduleSnapshotLoad(false);
+    }
+}, 2000);
 checkChatStatus();
 refreshGitBadge();
 setInterval(() => {
