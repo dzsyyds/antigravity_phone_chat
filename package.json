@@ -9,7 +9,7 @@
     "scripts": {
         "start": "node server.js",
         "dev": "node server.js",
-        "check": "node --check server.js && node --check public/js/app.js"
+        "check": "node --check server.js && node --check daemon_launcher.mjs && node --check public/js/app.js"
     },
     "dependencies": {
         "compression": "^1.8.1",

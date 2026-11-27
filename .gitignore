@@ -36,6 +36,9 @@ certs/
 # Tunnel binaries & archives (download locally, do not commit)
 *.exe
 *.zip
+daemon.pid
+tunnel_state.json
+连接信息.txt
 
 # Registry
 registry/

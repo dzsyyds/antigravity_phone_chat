@@ -3090,6 +3090,20 @@ async function main() {
             }
         });
 
+        // Read live daemon / tunnel URL state if started via daemon_launcher.mjs
+        app.get('/tunnel-info', (req, res) => {
+            try {
+                const statePath = join(__dirname, 'tunnel_state.json');
+                if (!fs.existsSync(statePath)) {
+                    return res.json({ success: true, publicUrl: '', localUrl: `http://${getLocalIP()}:${SERVER_PORT}` });
+                }
+                const data = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+                return res.json({ success: true, ...data });
+            } catch (err) {
+                return res.status(500).json({ success: false, error: err.message });
+            }
+        });
+
         // Voice input / optional Gemini STT capabilities
         app.get('/voice-capabilities', (req, res) => {
             const hasGeminiKey = Boolean((process.env.GEMINI_API_KEY || '').trim());
