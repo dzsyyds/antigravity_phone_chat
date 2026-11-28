@@ -53,5 +53,7 @@ bin/ (Linux specific)
 pyvenv.cfg
 include/
 lib/
+!/lib/
+!/lib/*.mjs
 lib64/
 share/
