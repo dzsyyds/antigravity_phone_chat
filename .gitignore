@@ -38,6 +38,7 @@ certs/
 *.zip
 daemon.pid
 tunnel_state.json
+webhook_config.json
 连接信息.txt
 
 # Registry

@@ -10,7 +10,7 @@
     <title>Antigravity 掌上控制台</title>
     <link rel="manifest" href="/manifest.json">
     <link rel="icon" type="image/svg+xml" href="/icon.svg">
-    <link rel="stylesheet" href="css/style.css?v=0.5.1">
+    <link rel="stylesheet" href="css/style.css?v=0.6.0">
     <!-- Security: Content Security Policy -->
     <meta http-equiv="Content-Security-Policy"
         content="default-src 'self'; connect-src 'self' ws: wss:; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline';">
@@ -141,6 +141,28 @@
             </svg>
             <span>完整对话</span>
         </button>
+        <button class="setting-chip" id="filesBtn" title="浏览工作区文件与 @ 引用路径">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+            </svg>
+            <span>文件</span>
+        </button>
+        <button class="setting-chip" id="wakeLockBtn" title="保持手机常亮与电脑防休眠">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <circle cx="12" cy="12" r="4"></circle>
+                <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
+            </svg>
+            <span id="wakeLockText">常亮</span>
+        </button>
+        <button class="setting-chip" id="qrPairBtn" title="生成免密扫码配对二维码">
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="3" y="3" width="7" height="7"></rect>
+                <rect x="14" y="3" width="7" height="7"></rect>
+                <rect x="3" y="14" width="7" height="7"></rect>
+                <path d="M14 14h3v3h-3zM17 17h4v4h-4zM20 14v1"></path>
+            </svg>
+            <span>扫码</span>
+        </button>
         <div class="setting-chip sync-stats" id="syncStats">
             <span id="statsText">流式同步</span>
         </div>
@@ -211,6 +233,13 @@
             <button class="action-chip" data-action="请详细解释当前代码的实现原理" type="button">解释代码</button>
             <button class="action-chip" data-action="请审查代码并给出性能或结构优化建议" type="button">优化建议</button>
             <button class="action-chip" data-action="请撤销上一步操作并回滚修改" type="button">撤回上步</button>
+        </div>
+
+        <!-- 待发指令排队提示条 -->
+        <div class="queue-bar" id="queueBar" style="display: none;">
+            <span class="queue-bar-dot"></span>
+            <span class="queue-bar-text" id="queueBarText">待发队列 0 条 · 空闲后自动发送</span>
+            <span class="queue-bar-action">管理</span>
         </div>
 
         <!-- 图片待发送预览条 -->
@@ -345,6 +374,30 @@
         <div class="history-content" id="transcriptList"></div>
     </div>
 
+    <!-- 工作区文件浏览与 @ 引用抽屉 (P1-3) -->
+    <div class="history-layer" id="filesLayer">
+        <div class="history-header">
+            <button class="icon-btn" id="closeFilesBtn" aria-label="返回">
+                <svg viewBox="0 0 24 24" width="22" height="22" stroke="currentColor" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+                    <path d="M19 12H5M12 19l-7-7 7-7" />
+                </svg>
+            </button>
+            <h2>工作区文件</h2>
+            <span class="history-count-badge" id="filesCountBadge"></span>
+        </div>
+        <div class="history-search-wrap">
+            <div class="history-search-box">
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                </svg>
+                <input type="search" id="filesSearchInput" placeholder="搜索文件名或路径...">
+            </div>
+            <div class="files-breadcrumb-bar" id="filesBreadcrumb"></div>
+        </div>
+        <div class="history-content" id="filesList"></div>
+    </div>
+
     <!-- Gemini Live 风格实时语音对话浮层 -->
     <div class="live-overlay" id="liveOverlay" aria-hidden="true">
         <div class="live-topbar">
@@ -409,7 +462,7 @@
         </div>
     </div>
 
-    <script src="js/app.js?v=0.5.1"></script>
+    <script src="js/app.js?v=0.6.0"></script>
 </body>
 
 </html>

@@ -60,6 +60,19 @@ const supportOverlay = document.getElementById('supportOverlay');
 const closeSupportBtn = document.getElementById('closeSupportBtn');
 const backHistoryBtn = document.querySelector('.history-header .icon-btn');
 const quickActionChips = document.querySelectorAll('.action-chip');
+const quickActionsBar = document.getElementById('quickActionsBar');
+const filesBtn = document.getElementById('filesBtn');
+const wakeLockBtn = document.getElementById('wakeLockBtn');
+const wakeLockText = document.getElementById('wakeLockText');
+const qrPairBtn = document.getElementById('qrPairBtn');
+const queueBar = document.getElementById('queueBar');
+const queueBarText = document.getElementById('queueBarText');
+const filesLayer = document.getElementById('filesLayer');
+const closeFilesBtn = document.getElementById('closeFilesBtn');
+const filesSearchInput = document.getElementById('filesSearchInput');
+const filesBreadcrumb = document.getElementById('filesBreadcrumb');
+const filesList = document.getElementById('filesList');
+const filesCountBadge = document.getElementById('filesCountBadge');
 
 // --- State ---
 let autoRefreshEnabled = true;
@@ -179,19 +192,171 @@ function triggerMobileAlert(title, body, type = 'success') {
 applyNotifyUI();
 
 if (notifyBtn) {
-    notifyBtn.addEventListener('click', async () => {
+    notifyBtn.addEventListener('click', () => {
         haptic(10);
+        openNotifySettingsModal();
+    });
+}
+
+let webhookEnabledFlag = false;
+async function syncNotifyBadgeState() {
+    try {
+        const res = await fetchWithAuth('/webhook-config');
+        if (res.ok) {
+            const cfg = await res.json();
+            webhookEnabledFlag = Boolean(cfg.enabled && cfg.url);
+        }
+    } catch {}
+    if (notifyBtn) notifyBtn.classList.toggle('active', alertsEnabled || webhookEnabledFlag);
+    if (notifyText) {
+        if (alertsEnabled && webhookEnabledFlag) notifyText.textContent = '提醒:全开';
+        else if (webhookEnabledFlag) notifyText.textContent = '推送:开';
+        else notifyText.textContent = alertsEnabled ? '提醒:开' : '提醒:关';
+    }
+}
+
+async function openNotifySettingsModal() {
+    modalTitle.textContent = '提醒与离屏 Webhook 推送';
+    modalList.innerHTML = '<div style="text-align:center;padding:18px;color:var(--text-muted)">正在读取配置...</div>';
+    modalOverlay.classList.add('show');
+
+    let cfg = { enabled: false, channel: 'auto', url: '', telegramChatId: '' };
+    try {
+        const res = await fetchWithAuth('/webhook-config');
+        if (res.ok) cfg = await res.json();
+    } catch {}
+
+    modalList.innerHTML = `
+        <div class="modal-section-card">
+            <div class="modal-section-row">
+                <div class="modal-option-main">
+                    <span class="modal-option-name">手机前台声音与弹窗提醒</span>
+                    <span class="modal-option-badge">任务完成或出现审批弹窗时响铃震动</span>
+                </div>
+                <button type="button" class="modal-mini-btn ${alertsEnabled ? 'primary' : ''}" id="toggleLocalAlertBtn">${alertsEnabled ? '已开启' : '已关闭'}</button>
+            </div>
+        </div>
+        <div class="modal-section-card">
+            <div class="modal-section-row">
+                <div class="modal-option-main">
+                    <span class="modal-option-name">离屏 Webhook 推送</span>
+                    <span class="modal-option-badge">锁屏或切微信时接收飞书/钉钉/Bark/Telegram 提醒</span>
+                </div>
+                <button type="button" class="modal-mini-btn ${cfg.enabled ? 'primary' : ''}" id="toggleWebhookEnabledBtn">${cfg.enabled ? '已开启' : '已关闭'}</button>
+            </div>
+            <label class="modal-form-label" for="webhookChannelSelect">推送通道</label>
+            <select id="webhookChannelSelect" class="modal-select">
+                <option value="auto">自动识别 URL</option>
+                <option value="feishu">飞书机器人 (Feishu)</option>
+                <option value="dingtalk">钉钉机器人 (DingTalk)</option>
+                <option value="wecom">企业微信机器人 (WeCom)</option>
+                <option value="bark">iOS Bark</option>
+                <option value="serverchan">Server 酱</option>
+                <option value="pushplus">PushPlus</option>
+                <option value="telegram">Telegram Bot</option>
+                <option value="generic">通用 JSON Webhook</option>
+            </select>
+            <label class="modal-form-label" for="webhookUrlInput">Webhook 地址</label>
+            <input id="webhookUrlInput" class="modal-input" type="url" placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." value="${escapeHtml(cfg.url || '')}">
+            <div id="tgChatIdWrap" style="display: ${cfg.channel === 'telegram' ? 'block' : 'none'};">
+                <label class="modal-form-label" for="webhookTgChatInput">Telegram Chat ID</label>
+                <input id="webhookTgChatInput" class="modal-input" type="text" placeholder="例如 123456789" value="${escapeHtml(cfg.telegramChatId || '')}">
+            </div>
+            <div class="modal-btn-row">
+                <button type="button" class="modal-mini-btn primary flex1" id="saveWebhookBtn">保存配置</button>
+                <button type="button" class="modal-mini-btn flex1" id="testWebhookBtn">发送测试</button>
+            </div>
+        </div>
+    `;
+
+    let localWebhookEnabled = Boolean(cfg.enabled);
+    const localAlertBtn = document.getElementById('toggleLocalAlertBtn');
+    const whEnabledBtn = document.getElementById('toggleWebhookEnabledBtn');
+    const chSelect = document.getElementById('webhookChannelSelect');
+    const urlInput = document.getElementById('webhookUrlInput');
+    const tgWrap = document.getElementById('tgChatIdWrap');
+    const tgInput = document.getElementById('webhookTgChatInput');
+    const saveBtn = document.getElementById('saveWebhookBtn');
+    const testBtn = document.getElementById('testWebhookBtn');
+
+    if (chSelect) chSelect.value = cfg.channel || 'auto';
+    chSelect?.addEventListener('change', () => {
+        if (tgWrap) tgWrap.style.display = chSelect.value === 'telegram' ? 'block' : 'none';
+    });
+
+    localAlertBtn?.addEventListener('click', async () => {
         alertsEnabled = !alertsEnabled;
-        try { localStorage.setItem(ALERTS_KEY, String(alertsEnabled)); } catch (e) {}
+        try { localStorage.setItem(ALERTS_KEY, String(alertsEnabled)); } catch {}
+        localAlertBtn.textContent = alertsEnabled ? '已开启' : '已关闭';
+        localAlertBtn.classList.toggle('primary', alertsEnabled);
         applyNotifyUI();
+        syncNotifyBadgeState();
         if (alertsEnabled) {
             playAlertTone();
             if ('Notification' in window && Notification.permission === 'default') {
-                try { await Notification.requestPermission(); } catch (e) {}
+                try { await Notification.requestPermission(); } catch {}
             }
-            showToast('已开启完成与审批提醒', 'success', 2000);
-        } else {
-            showToast('已关闭声音与弹窗提醒', 'info', 1600);
+        }
+    });
+
+    whEnabledBtn?.addEventListener('click', () => {
+        localWebhookEnabled = !localWebhookEnabled;
+        whEnabledBtn.textContent = localWebhookEnabled ? '已开启' : '已关闭';
+        whEnabledBtn.classList.toggle('primary', localWebhookEnabled);
+    });
+
+    saveBtn?.addEventListener('click', async () => {
+        saveBtn.disabled = true;
+        try {
+            const res = await fetchWithAuth('/webhook-config', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    enabled: localWebhookEnabled,
+                    channel: chSelect?.value || 'auto',
+                    url: urlInput?.value.trim() || '',
+                    telegramChatId: tgInput?.value.trim() || ''
+                })
+            });
+            const data = await res.json();
+            if (!res.ok || !data.success) {
+                showToast(data.error || '保存失败', 'error');
+            } else {
+                await syncNotifyBadgeState();
+                showToast('Webhook 推送配置已保存', 'success');
+            }
+        } catch {
+            showToast('保存配置失败', 'error');
+        } finally {
+            saveBtn.disabled = false;
+        }
+    });
+
+    testBtn?.addEventListener('click', async () => {
+        testBtn.disabled = true;
+        testBtn.textContent = '发送中...';
+        try {
+            const res = await fetchWithAuth('/webhook-test', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    enabled: true,
+                    channel: chSelect?.value || 'auto',
+                    url: urlInput?.value.trim() || '',
+                    telegramChatId: tgInput?.value.trim() || ''
+                })
+            });
+            const data = await res.json();
+            if (res.ok && data.success) {
+                showToast(`测试推送成功 (${data.channel || 'webhook'})`, 'success');
+            } else {
+                showToast(data.error || '测试推送失败', 'error', 2800);
+            }
+        } catch {
+            showToast('测试请求发送失败', 'error');
+        } finally {
+            testBtn.disabled = false;
+            testBtn.textContent = '发送测试';
         }
     });
 }
@@ -439,6 +604,8 @@ function connectWebSocket() {
             } else {
                 scheduleSnapshotLoad(false);
             }
+        } else if (data.type === 'queue_update' && typeof renderQueueBar === 'function') {
+            renderQueueBar(data.queue || []);
         }
     };
 
@@ -1250,6 +1417,44 @@ async function sendMessage() {
     if (!message && !attachment) return;
 
     haptic(15);
+
+    // P1-2: When desktop agent is busy and sending text-only prompt, enqueue automatically
+    if (isAgentBusy && !attachment && message) {
+        isSending = true;
+        const prevDraft = messageInput.value;
+        messageInput.value = '';
+        resizeTextarea();
+        saveDraft();
+        sendBtn.disabled = true;
+        try {
+            const qRes = await fetchWithAuth('/queue', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ message })
+            });
+            const qData = await qRes.json().catch(() => ({}));
+            if (qRes.ok && qData.success) {
+                renderQueueBar(qData.queue || []);
+                showToast(`智能体执行中，已加入待发队列 (${(qData.queue || []).length})`, 'info', 2200);
+                messageInput.blur();
+            } else {
+                messageInput.value = prevDraft;
+                resizeTextarea();
+                saveDraft();
+                showToast(qData.error || '加入队列失败', 'error', 2400);
+            }
+        } catch {
+            messageInput.value = prevDraft;
+            resizeTextarea();
+            saveDraft();
+            showToast('加入队列失败，请检查网络', 'error');
+        } finally {
+            isSending = false;
+            sendBtn.disabled = false;
+        }
+        return;
+    }
+
     isSending = true;
     const prevDraft = messageInput.value;
     messageInput.value = '';
@@ -2065,9 +2270,21 @@ if (dismissSslBtn) dismissSslBtn.addEventListener('click', dismissSslBanner);
 if (closeModalBtn) closeModalBtn.addEventListener('click', closeModal);
 if (backHistoryBtn) backHistoryBtn.addEventListener('click', hideChatHistory);
 
-quickActionChips.forEach(chip => {
-    if (chip.id === 'enterModeBtn') return;
-    chip.addEventListener('click', () => {
+// P0-3 Custom Prompt Snippets + Keyboard-steady event delegation
+if (quickActionsBar) {
+    quickActionsBar.addEventListener('mousedown', (e) => {
+        if (e.target.closest('#enterModeBtn, .insert-chip')) {
+            e.preventDefault();
+        }
+    });
+    quickActionsBar.addEventListener('click', (e) => {
+        const chip = e.target.closest('.action-chip');
+        if (!chip || chip.id === 'enterModeBtn') return;
+        if (chip.id === 'manageSnippetsBtn') {
+            haptic(10);
+            openSnippetManagerModal();
+            return;
+        }
         const insertText = chip.getAttribute('data-insert');
         if (insertText) {
             insertTextAtCursor(insertText);
@@ -2076,7 +2293,7 @@ quickActionChips.forEach(chip => {
         const actionText = chip.getAttribute('data-action') || chip.innerText.trim();
         quickAction(actionText);
     });
-});
+}
 
 if (historyList) {
     historyList.addEventListener('click', (e) => {
@@ -2307,57 +2524,137 @@ async function refreshGitBadge() {
     } catch (e) {}
 }
 
-if (gitDiffBtn) {
-    gitDiffBtn.addEventListener('click', async () => {
-        haptic(10);
-        try {
-            const res = await fetchWithAuth('/git-status');
-            const data = await res.json();
-            if (!data.isGitRepo) {
-                showToast('当前工作区不是 Git 仓库', 'info');
+async function openGitManagerModal() {
+    try {
+        const res = await fetchWithAuth('/git-status');
+        const data = await res.json();
+        if (!data.isGitRepo) {
+            showToast('当前工作区不是 Git 仓库', 'info');
+            return;
+        }
+        const files = data.files || [];
+        if (gitDiffText) gitDiffText.textContent = files.length > 0 ? `改动(${files.length})` : '改动';
+        if (files.length === 0) {
+            modalOverlay.classList.remove('show');
+            showToast(`分支 ${data.branch || 'main'} 当前工作区干净无改动`, 'success', 2200);
+            return;
+        }
+        const stagedCount = files.filter(f => f.staged).length;
+        modalTitle.textContent = `Git · ${data.branch} (${files.length} 改动 / ${stagedCount} 已暂存)`;
+        modalList.innerHTML = '';
+
+        const commitBox = document.createElement('div');
+        commitBox.className = 'git-commit-box';
+        commitBox.innerHTML = `
+            <input id="gitCommitMsgInput" class="modal-input" type="text" placeholder="输入提交说明 (Commit Message)..." maxlength="200">
+            <div class="modal-btn-row">
+                <button type="button" class="modal-mini-btn" id="gitStageAllBtn">全部暂存</button>
+                <button type="button" class="modal-mini-btn" id="gitUnstageAllBtn">全部撤暂存</button>
+                <button type="button" class="modal-mini-btn primary flex1" id="gitCommitNowBtn" ${stagedCount === 0 ? 'disabled' : ''}>提交 (${stagedCount})</button>
+            </div>
+        `;
+        modalList.appendChild(commitBox);
+
+        const doGitPost = async (url, payload, okMsg) => {
+            try {
+                const r = await fetchWithAuth(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const d = await r.json().catch(() => ({}));
+                if (r.ok && d.success) {
+                    showToast(okMsg, 'success', 1600);
+                    await refreshGitBadge();
+                    await openGitManagerModal();
+                } else {
+                    showToast(d.error || 'Git 操作失败', 'error', 2600);
+                }
+            } catch {
+                showToast('Git 请求失败', 'error');
+            }
+        };
+
+        commitBox.querySelector('#gitStageAllBtn')?.addEventListener('click', () => {
+            haptic(10);
+            doGitPost('/git-stage', { all: true, unstage: false }, '已全部暂存');
+        });
+        commitBox.querySelector('#gitUnstageAllBtn')?.addEventListener('click', () => {
+            haptic(10);
+            doGitPost('/git-stage', { all: true, unstage: true }, '已取消全部暂存');
+        });
+        commitBox.querySelector('#gitCommitNowBtn')?.addEventListener('click', () => {
+            const msg = commitBox.querySelector('#gitCommitMsgInput')?.value.trim() || '';
+            if (!msg) {
+                showToast('请先输入提交说明', 'info');
                 return;
             }
-            const files = data.files || [];
-            if (gitDiffText) gitDiffText.textContent = files.length > 0 ? `改动(${files.length})` : '改动';
-            if (files.length === 0) {
-                showToast(`分支 ${data.branch || 'main'} 当前工作区干净无改动`, 'success', 2200);
-                return;
-            }
-            modalTitle.textContent = `代码改动 · ${data.branch} (${files.length})`;
-            modalList.innerHTML = '';
-            files.forEach(f => {
-                const div = document.createElement('div');
-                div.className = 'modal-option';
-                const statusCls = f.status.includes('?') || f.status.includes('A') ? 'added' : (f.status.includes('D') ? 'deleted' : '');
-                const statText = (f.insertions || f.deletions) ? `+${f.insertions} / -${f.deletions}` : '点击查看对比';
-                div.innerHTML = `
+            haptic(15);
+            doGitPost('/git-commit', { message: msg }, '已提交到本地仓库');
+        });
+
+        files.forEach(f => {
+            const row = document.createElement('div');
+            row.className = 'git-file-row';
+            const statusCls = f.status.includes('?') || f.status.includes('A') ? 'added' : (f.status.includes('D') ? 'deleted' : '');
+            const statText = (f.insertions || f.deletions) ? `+${f.insertions} / -${f.deletions}` : '点击查看对比';
+            const stageTag = f.staged ? '已暂存' : '未暂存';
+            row.innerHTML = `
+                <div class="git-file-top">
                     <div class="modal-option-main">
                         <span class="modal-option-name">${escapeHtml(f.path)}</span>
-                        <span class="modal-option-badge">${escapeHtml(statText)}</span>
+                        <span class="modal-option-badge">${escapeHtml(stageTag)} · ${escapeHtml(statText)}</span>
                     </div>
                     <span class="diff-status-badge ${statusCls}">${escapeHtml(f.status)}</span>
-                `;
-                div.addEventListener('click', async () => {
-                    haptic(12);
-                    closeModal();
-                    try {
-                        const dRes = await fetchWithAuth(`/git-diff?file=${encodeURIComponent(f.path)}`);
-                        const dData = await dRes.json();
-                        if (dData.success) {
-                            openDiffModal(f.path, dData.diff);
-                        } else {
-                            showToast(dData.error || '读取 Diff 失败', 'error');
-                        }
-                    } catch (e) {
-                        showToast('读取文件 Diff 失败', 'error');
-                    }
-                });
-                modalList.appendChild(div);
+                </div>
+                <div class="git-file-actions">
+                    <button type="button" class="modal-mini-btn git-toggle-stage-btn">${f.staged ? '取消暂存' : '暂存'}</button>
+                    <button type="button" class="modal-mini-btn danger git-discard-btn">丢弃</button>
+                </div>
+            `;
+            row.querySelector('.git-file-top')?.addEventListener('click', async () => {
+                haptic(12);
+                closeModal();
+                try {
+                    const dRes = await fetchWithAuth(`/git-diff?file=${encodeURIComponent(f.path)}`);
+                    const dData = await dRes.json();
+                    if (dData.success) openDiffModal(f.path, dData.diff);
+                    else showToast(dData.error || '读取 Diff 失败', 'error');
+                } catch {
+                    showToast('读取文件 Diff 失败', 'error');
+                }
             });
-            modalOverlay.classList.add('show');
-        } catch (err) {
-            showToast('获取 Git 状态失败', 'error');
-        }
+            row.querySelector('.git-toggle-stage-btn')?.addEventListener('click', () => {
+                haptic(10);
+                doGitPost('/git-stage', { file: f.path, unstage: Boolean(f.staged) }, f.staged ? '已取消暂存' : '已暂存');
+            });
+            const discardBtn = row.querySelector('.git-discard-btn');
+            let discardArmed = false;
+            discardBtn?.addEventListener('click', () => {
+                if (!discardArmed) {
+                    discardArmed = true;
+                    discardBtn.textContent = '确认丢弃?';
+                    setTimeout(() => {
+                        discardArmed = false;
+                        if (discardBtn.isConnected) discardBtn.textContent = '丢弃';
+                    }, 3000);
+                    return;
+                }
+                haptic(20);
+                doGitPost('/git-discard', { file: f.path }, '已还原该文件改动');
+            });
+            modalList.appendChild(row);
+        });
+        modalOverlay.classList.add('show');
+    } catch {
+        showToast('获取 Git 状态失败', 'error');
+    }
+}
+
+if (gitDiffBtn) {
+    gitDiffBtn.addEventListener('click', () => {
+        haptic(10);
+        openGitManagerModal();
     });
 }
 
@@ -3110,7 +3407,9 @@ connectWebSocket();
 loadSnapshot(true);
 fetchAppState();
 fetchQuotaSummary(false);
-setInterval(fetchAppState, 4000);
+setInterval(() => {
+    if (!document.hidden) fetchAppState();
+}, 4000);
 setInterval(() => {
     if (!wsConnected && autoRefreshEnabled && !document.hidden && !userIsScrolling) {
         scheduleSnapshotLoad(false);
@@ -3129,3 +3428,526 @@ setInterval(() => {
         fetchQuotaSummary(false);
     }
 }, 90000);
+
+
+// ============================================================
+// P0-1~P0-4 & P1-1~P1-3 Modular Mobile Console Enhancements
+// ============================================================
+
+// --- P0-4: Register Pass-Through Service Worker for PWA ---
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('/sw.js').catch(() => {});
+    });
+}
+
+// --- P0-1: One-Tap QR Pairing Modal ---
+let qrCountdownTimer = null;
+
+async function openQrPairModal(prefer = 'public') {
+    if (!modalOverlay || !modalList || !modalTitle) return;
+    clearInterval(qrCountdownTimer);
+    modalTitle.textContent = '扫码免密登录';
+    modalList.innerHTML = '<div style="text-align:center;padding:18px;color:var(--text-muted)">正在生成一次性配对二维码...</div>';
+    modalOverlay.classList.add('show');
+
+    try {
+        const res = await fetchWithAuth('/pair-token', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ prefer })
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+            modalList.innerHTML = `<div style="text-align:center;padding:16px;color:#fca5a5">${escapeHtml(data.error || '生成二维码失败')}</div>`;
+            return;
+        }
+
+        let leftSec = Number(data.expiresInSec || 120);
+        const hasPublic = Boolean(data.publicPairUrl);
+        modalList.innerHTML = `
+            <div class="qr-box">
+                <div class="qr-svg-wrap" id="qrSvgHost"></div>
+                <div class="qr-url-preview" id="qrUrlPreview">${escapeHtml(data.activePairUrl)}</div>
+                <div style="font-size:12px;color:var(--text-muted);" id="qrCountdownText">一次性配对链接 · ${leftSec}s 后自动失效</div>
+            </div>
+            <div class="modal-btn-row">
+                ${hasPublic ? `<button type="button" class="modal-mini-btn ${prefer !== 'local' ? 'primary' : ''}" id="qrUsePublicBtn">公网链接</button>` : ''}
+                <button type="button" class="modal-mini-btn ${(!hasPublic || prefer === 'local') ? 'primary' : ''}" id="qrUseLocalBtn">局域网</button>
+                <button type="button" class="modal-mini-btn flex1" id="qrCopyLinkBtn">复制链接</button>
+                <button type="button" class="modal-mini-btn" id="qrRefreshBtn">刷新</button>
+            </div>
+        `;
+        const svgHost = document.getElementById('qrSvgHost');
+        if (svgHost && data.svg) svgHost.innerHTML = data.svg;
+
+        qrCountdownTimer = setInterval(() => {
+            if (!modalOverlay.classList.contains('show')) {
+                clearInterval(qrCountdownTimer);
+                return;
+            }
+            leftSec--;
+            const el = document.getElementById('qrCountdownText');
+            if (!el) {
+                clearInterval(qrCountdownTimer);
+                return;
+            }
+            if (leftSec <= 0) {
+                clearInterval(qrCountdownTimer);
+                el.textContent = '当前二维码已过期，请点击“刷新”重新生成';
+                el.style.color = '#fca5a5';
+            } else {
+                el.textContent = `一次性配对链接 · ${leftSec}s 后自动失效`;
+            }
+        }, 1000);
+
+        document.getElementById('qrUsePublicBtn')?.addEventListener('click', () => openQrPairModal('public'));
+        document.getElementById('qrUseLocalBtn')?.addEventListener('click', () => openQrPairModal('local'));
+        document.getElementById('qrRefreshBtn')?.addEventListener('click', () => openQrPairModal(prefer));
+        document.getElementById('qrCopyLinkBtn')?.addEventListener('click', async () => {
+            const ok = await copyToClipboard(data.activePairUrl);
+            showToast(ok ? '已复制免密配对链接' : '请长按上方地址手动复制', ok ? 'success' : 'info');
+        });
+    } catch {
+        modalList.innerHTML = '<div style="text-align:center;padding:16px;color:#fca5a5">网络请求失败，无法生成二维码</div>';
+    }
+}
+
+if (qrPairBtn) {
+    qrPairBtn.addEventListener('click', () => {
+        haptic(10);
+        openQrPairModal('public');
+    });
+}
+
+// --- P0-2: Mobile Screen Wake Lock + Host Keep-Awake ---
+const WAKE_PREF_KEY = 'ag_wake_lock_pref';
+let wakePrefEnabled = localStorage.getItem(WAKE_PREF_KEY) === 'true';
+let screenWakeSentinel = null;
+
+async function applyScreenWakeLock(enable) {
+    if (!('wakeLock' in navigator)) return false;
+    try {
+        if (enable) {
+            if (!screenWakeSentinel && !document.hidden) {
+                screenWakeSentinel = await navigator.wakeLock.request('screen');
+                screenWakeSentinel.addEventListener('release', () => {
+                    screenWakeSentinel = null;
+                });
+            }
+            return true;
+        } else if (screenWakeSentinel) {
+            await screenWakeSentinel.release();
+            screenWakeSentinel = null;
+        }
+    } catch {}
+    return false;
+}
+
+function updateWakeLockBtnUI() {
+    if (wakeLockBtn) wakeLockBtn.classList.toggle('active', wakePrefEnabled);
+    if (wakeLockText) wakeLockText.textContent = wakePrefEnabled ? '常亮:开' : '常亮';
+}
+
+async function syncWakeStateToServer(enabled) {
+    try {
+        await fetchWithAuth('/keep-awake', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ enabled: Boolean(enabled) })
+        });
+    } catch {}
+}
+
+if (wakeLockBtn) {
+    wakeLockBtn.addEventListener('click', async () => {
+        haptic(10);
+        wakePrefEnabled = !wakePrefEnabled;
+        try { localStorage.setItem(WAKE_PREF_KEY, String(wakePrefEnabled)); } catch {}
+        updateWakeLockBtnUI();
+        await applyScreenWakeLock(wakePrefEnabled);
+        await syncWakeStateToServer(wakePrefEnabled);
+        showToast(wakePrefEnabled ? '已开启手机常亮与电脑防休眠' : '已关闭常亮与手动防休眠', wakePrefEnabled ? 'success' : 'info', 2000);
+    });
+}
+
+document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && wakePrefEnabled) {
+        applyScreenWakeLock(true);
+    }
+});
+
+if (wakePrefEnabled) {
+    updateWakeLockBtnUI();
+    applyScreenWakeLock(true);
+    syncWakeStateToServer(true);
+}
+
+// --- P0-3: Custom Prompt Snippets ---
+const SNIPPETS_KEY = 'ag_custom_snippets_v1';
+const DEFAULT_SNIPPETS = [
+    { label: '/ 命令', content: '/', mode: 'insert' },
+    { label: '@ 文件', content: '@', mode: 'insert' },
+    { label: '继续执行', content: '请继续执行下一步任务', mode: 'send' },
+    { label: '修复报错', content: '请分析并修复刚才的报错', mode: 'send' },
+    { label: '总结进度', content: '请总结当前完成情况与后续计划', mode: 'send' },
+    { label: '运行测试', content: '请运行测试并验证当前修改是否全部通过', mode: 'send' },
+    { label: '解释代码', content: '请详细解释当前代码的实现原理', mode: 'send' },
+    { label: '优化建议', content: '请审查代码并给出性能或结构优化建议', mode: 'send' },
+    { label: '撤回上步', content: '请撤销上一步操作并回滚修改', mode: 'send' }
+];
+
+function loadCustomSnippets() {
+    try {
+        const raw = localStorage.getItem(SNIPPETS_KEY);
+        if (!raw) return DEFAULT_SNIPPETS.map(s => ({ ...s }));
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    } catch {}
+    return DEFAULT_SNIPPETS.map(s => ({ ...s }));
+}
+
+function saveCustomSnippets(list) {
+    try { localStorage.setItem(SNIPPETS_KEY, JSON.stringify(list)); } catch {}
+}
+
+function renderSnippetsBar() {
+    if (!quickActionsBar) return;
+    const enterBtnNode = document.getElementById('enterModeBtn');
+    const snippets = loadCustomSnippets();
+
+    quickActionsBar.innerHTML = '';
+    if (enterBtnNode) quickActionsBar.appendChild(enterBtnNode);
+
+    snippets.forEach(item => {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        const isInsert = item.mode === 'insert';
+        btn.className = `action-chip${isInsert ? ' insert-chip' : ''}`;
+        if (isInsert) btn.setAttribute('data-insert', item.content);
+        else btn.setAttribute('data-action', item.content);
+        btn.textContent = item.label;
+        quickActionsBar.appendChild(btn);
+    });
+
+    const manageBtn = document.createElement('button');
+    manageBtn.type = 'button';
+    manageBtn.id = 'manageSnippetsBtn';
+    manageBtn.className = 'action-chip manage-chip';
+    manageBtn.textContent = '+ 管理';
+    quickActionsBar.appendChild(manageBtn);
+}
+
+function openSnippetManagerModal() {
+    let snippets = loadCustomSnippets();
+    modalTitle.textContent = '管理快捷指令胶囊';
+
+    const draw = () => {
+        modalList.innerHTML = `
+            <div class="modal-section-card">
+                <div class="modal-option-name" style="margin-bottom:6px;">新增快捷胶囊</div>
+                <input id="snipLabelInput" class="modal-input" type="text" placeholder="按钮短标签，例如：/plan 或 跑回归" maxlength="16">
+                <input id="snipContentInput" class="modal-input" type="text" style="margin-top:8px;" placeholder="发送或插入的指令内容..." maxlength="400">
+                <select id="snipModeSelect" class="modal-select" style="margin-top:8px;">
+                    <option value="send">点击直接发送指令</option>
+                    <option value="insert">点击填入输入框光标处</option>
+                </select>
+                <div class="modal-btn-row">
+                    <button type="button" class="modal-mini-btn primary flex1" id="snipAddBtn">添加胶囊</button>
+                    <button type="button" class="modal-mini-btn" id="snipResetBtn">恢复默认</button>
+                </div>
+            </div>
+            <div id="snipItemsHost"></div>
+        `;
+
+        const host = document.getElementById('snipItemsHost');
+        snippets.forEach((s, idx) => {
+            const row = document.createElement('div');
+            row.className = 'git-file-row';
+            row.innerHTML = `
+                <div class="modal-section-row">
+                    <div class="modal-option-main">
+                        <span class="modal-option-name">${escapeHtml(s.label)} · <small style="color:var(--text-muted)">${s.mode === 'insert' ? '填入' : '直发'}</small></span>
+                        <span class="modal-option-badge">${escapeHtml(s.content)}</span>
+                    </div>
+                </div>
+                <div class="git-file-actions">
+                    ${idx > 0 ? `<button type="button" class="modal-mini-btn" data-mv="-1">上移</button>` : ''}
+                    ${idx < snippets.length - 1 ? `<button type="button" class="modal-mini-btn" data-mv="1">下移</button>` : ''}
+                    <button type="button" class="modal-mini-btn danger" data-del="1">删除</button>
+                </div>
+            `;
+            row.querySelector('[data-mv="-1"]')?.addEventListener('click', () => {
+                [snippets[idx - 1], snippets[idx]] = [snippets[idx], snippets[idx - 1]];
+                saveCustomSnippets(snippets);
+                renderSnippetsBar();
+                draw();
+            });
+            row.querySelector('[data-mv="1"]')?.addEventListener('click', () => {
+                [snippets[idx + 1], snippets[idx]] = [snippets[idx], snippets[idx + 1]];
+                saveCustomSnippets(snippets);
+                renderSnippetsBar();
+                draw();
+            });
+            row.querySelector('[data-del="1"]')?.addEventListener('click', () => {
+                snippets.splice(idx, 1);
+                saveCustomSnippets(snippets);
+                renderSnippetsBar();
+                draw();
+            });
+            host?.appendChild(row);
+        });
+
+        document.getElementById('snipAddBtn')?.addEventListener('click', () => {
+            const label = document.getElementById('snipLabelInput')?.value.trim() || '';
+            const content = document.getElementById('snipContentInput')?.value || '';
+            const mode = document.getElementById('snipModeSelect')?.value === 'insert' ? 'insert' : 'send';
+            if (!label || !content.trim()) {
+                showToast('请填写按钮标签和指令内容', 'info');
+                return;
+            }
+            snippets.push({ label, content: mode === 'insert' ? content : content.trim(), mode });
+            saveCustomSnippets(snippets);
+            renderSnippetsBar();
+            draw();
+            showToast('已添加快捷胶囊', 'success', 1500);
+        });
+
+        document.getElementById('snipResetBtn')?.addEventListener('click', () => {
+            snippets = DEFAULT_SNIPPETS.map(s => ({ ...s }));
+            saveCustomSnippets(snippets);
+            renderSnippetsBar();
+            draw();
+            showToast('已恢复默认快捷指令', 'info', 1600);
+        });
+    };
+
+    draw();
+    modalOverlay.classList.add('show');
+}
+
+// --- P1-2: Busy-State Prompt Queue Bar & Modal ---
+let cachedQueue = [];
+
+function renderQueueBar(queue) {
+    cachedQueue = Array.isArray(queue) ? queue : [];
+    if (!queueBar || !queueBarText) return;
+    if (cachedQueue.length === 0) {
+        queueBar.style.display = 'none';
+    } else {
+        const preview = cachedQueue[0].message.slice(0, 26);
+        queueBarText.textContent = `待发队列 ${cachedQueue.length} 条 · 下一条: ${preview}`;
+        queueBar.style.display = 'flex';
+    }
+    if (typeof updateFabOffset === 'function') updateFabOffset();
+}
+
+async function fetchQueue() {
+    try {
+        const res = await fetchWithAuth('/queue');
+        if (res.ok) {
+            const data = await res.json();
+            renderQueueBar(data.queue || []);
+        }
+    } catch {}
+}
+
+function openQueueModal() {
+    modalTitle.textContent = `待发指令队列 (${cachedQueue.length})`;
+    const draw = () => {
+        if (cachedQueue.length === 0) {
+            modalList.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted)">当前队列为空</div>';
+            return;
+        }
+        modalList.innerHTML = `
+            <div class="modal-btn-row" style="margin:0 0 10px 0;">
+                <button type="button" class="modal-mini-btn danger flex1" id="clearAllQueueBtn">清空全部队列</button>
+            </div>
+            <div id="queueItemsHost"></div>
+        `;
+        const host = document.getElementById('queueItemsHost');
+        cachedQueue.forEach((item, idx) => {
+            const row = document.createElement('div');
+            row.className = 'git-file-row';
+            row.innerHTML = `
+                <div class="modal-option-main">
+                    <span class="modal-option-name">#${idx + 1} · ${escapeHtml(item.message.slice(0, 120))}</span>
+                    <span class="modal-option-badge">将在桌面空闲后自动发送</span>
+                </div>
+                <div class="git-file-actions">
+                    <button type="button" class="modal-mini-btn primary" data-send="${escapeHtml(item.id)}">立即发送</button>
+                    <button type="button" class="modal-mini-btn danger" data-del="${escapeHtml(item.id)}">移除</button>
+                </div>
+            `;
+            row.querySelector('[data-send]')?.addEventListener('click', async () => {
+                const res = await fetchWithAuth('/queue/send-now', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: item.id })
+                });
+                const d = await res.json().catch(() => ({}));
+                renderQueueBar(d.queue || []);
+                draw();
+                if (res.ok && d.success) showToast('已立即发送', 'success', 1400);
+            });
+            row.querySelector('[data-del]')?.addEventListener('click', async () => {
+                const res = await fetchWithAuth(`/queue/${encodeURIComponent(item.id)}`, { method: 'DELETE' });
+                const d = await res.json().catch(() => ({}));
+                renderQueueBar(d.queue || []);
+                draw();
+            });
+            host?.appendChild(row);
+        });
+        document.getElementById('clearAllQueueBtn')?.addEventListener('click', async () => {
+            const res = await fetchWithAuth('/queue/clear', { method: 'POST' });
+            const d = await res.json().catch(() => ({}));
+            renderQueueBar(d.queue || []);
+            closeModal();
+            showToast('已清空待发队列', 'info', 1500);
+        });
+    };
+    draw();
+    modalOverlay.classList.add('show');
+}
+
+if (queueBar) {
+    queueBar.addEventListener('click', () => {
+        haptic(8);
+        openQueueModal();
+    });
+}
+
+// --- P1-3: Read-Only Workspace File Browser & @ Path Reference ---
+let currentFilesDir = '';
+let filesSearchTimer = null;
+
+function formatFileBytes(bytes) {
+    const n = Number(bytes || 0);
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+async function loadWorkspaceFiles(dir = '', query = '') {
+    if (!filesList) return;
+    currentFilesDir = dir;
+    filesList.innerHTML = '<div style="text-align:center;padding:24px;color:var(--text-muted)">正在读取工作区文件...</div>';
+
+    if (filesBreadcrumb) {
+        filesBreadcrumb.innerHTML = '';
+        const rootBtn = document.createElement('button');
+        rootBtn.type = 'button';
+        rootBtn.className = `files-crumb-btn${!dir ? ' active' : ''}`;
+        rootBtn.textContent = '根目录';
+        rootBtn.addEventListener('click', () => {
+            if (filesSearchInput) filesSearchInput.value = '';
+            loadWorkspaceFiles('', '');
+        });
+        filesBreadcrumb.appendChild(rootBtn);
+
+        if (dir) {
+            const parts = dir.split('/').filter(Boolean);
+            let acc = '';
+            parts.forEach((p, idx) => {
+                acc = acc ? `${acc}/${p}` : p;
+                const targetDir = acc;
+                const b = document.createElement('button');
+                b.type = 'button';
+                b.className = `files-crumb-btn${idx === parts.length - 1 ? ' active' : ''}`;
+                b.textContent = p;
+                b.addEventListener('click', () => {
+                    if (filesSearchInput) filesSearchInput.value = '';
+                    loadWorkspaceFiles(targetDir, '');
+                });
+                filesBreadcrumb.appendChild(b);
+            });
+        }
+    }
+
+    try {
+        const url = `/files?dir=${encodeURIComponent(dir)}&q=${encodeURIComponent(query)}`;
+        const res = await fetchWithAuth(url);
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+            filesList.innerHTML = `<div style="text-align:center;padding:24px;color:#fca5a5">${escapeHtml(data.error || '读取文件失败')}</div>`;
+            return;
+        }
+        const entries = data.entries || [];
+        if (filesCountBadge) filesCountBadge.textContent = `${entries.length}`;
+        if (entries.length === 0) {
+            filesList.innerHTML = '<div style="text-align:center;padding:28px;color:var(--text-muted)">当前目录或搜索条件没有匹配文件</div>';
+            return;
+        }
+
+        const wrap = document.createElement('div');
+        wrap.className = 'history-list-group';
+        entries.forEach(item => {
+            const card = document.createElement('div');
+            card.className = 'file-row-card';
+            card.innerHTML = `
+                <div class="file-row-main">
+                    <div class="file-row-name">${item.isDir ? '[目录] ' : ''}${escapeHtml(query ? item.path : item.name)}</div>
+                    <div class="file-row-meta">${item.isDir ? '点击进入目录' : `${formatFileBytes(item.size)} · 点击查看源码`}</div>
+                </div>
+                ${!item.isDir ? `<button type="button" class="file-at-btn" title="插入 @${escapeHtml(item.path)} 到输入框">@引用</button>` : ''}
+            `;
+            card.querySelector('.file-row-main')?.addEventListener('click', async () => {
+                haptic(8);
+                if (item.isDir) {
+                    loadWorkspaceFiles(item.path, '');
+                    return;
+                }
+                try {
+                    const fRes = await fetchWithAuth(`/file-content?path=${encodeURIComponent(item.path)}`);
+                    const fData = await fRes.json();
+                    if (fRes.ok && fData.success) {
+                        openCodeModal(fData.content, item.path);
+                    } else {
+                        showToast(fData.error || '无法预览该文件', 'error', 2400);
+                    }
+                } catch {
+                    showToast('读取文件内容失败', 'error');
+                }
+            });
+            card.querySelector('.file-at-btn')?.addEventListener('click', (e) => {
+                e.stopPropagation();
+                haptic(10);
+                if (filesLayer) filesLayer.classList.remove('show');
+                insertTextAtCursor(`@${item.path} `);
+                showToast(`已引用 @${item.path}`, 'success', 1500);
+            });
+            wrap.appendChild(card);
+        });
+        filesList.innerHTML = '';
+        filesList.appendChild(wrap);
+    } catch {
+        filesList.innerHTML = '<div style="text-align:center;padding:24px;color:#fca5a5">网络请求失败</div>';
+    }
+}
+
+if (filesBtn && filesLayer) {
+    filesBtn.addEventListener('click', () => {
+        haptic(10);
+        filesLayer.classList.add('show');
+        loadWorkspaceFiles(currentFilesDir, filesSearchInput?.value.trim() || '');
+    });
+}
+if (closeFilesBtn && filesLayer) {
+    closeFilesBtn.addEventListener('click', () => {
+        haptic(6);
+        filesLayer.classList.remove('show');
+    });
+}
+if (filesSearchInput) {
+    filesSearchInput.addEventListener('input', () => {
+        clearTimeout(filesSearchTimer);
+        filesSearchTimer = setTimeout(() => {
+            loadWorkspaceFiles(currentFilesDir, filesSearchInput.value.trim());
+        }, 240);
+    });
+}
+
+// Initial hydration for P0-3 / P1-1 / P1-2
+renderSnippetsBar();
+syncNotifyBadgeState();
+fetchQueue();

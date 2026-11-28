@@ -4,8 +4,8 @@
   "description": "Google Antigravity 2.0 移动端远程监控与控制控制台",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#08080a",
-  "theme_color": "#08080a",
+  "background_color": "#08090e",
+  "theme_color": "#08090e",
   "orientation": "portrait-primary",
   "icons": [
     {

@@ -8,12 +8,16 @@ import http from 'http';
 import https from 'https';
 import fs from 'fs';
 import os from 'os';
+import crypto from 'crypto';
 import WebSocket from 'ws';
+import QRCode from 'qrcode';
 import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { dirname, join, resolve as pathResolve, relative as pathRelative } from 'path';
 import { inspectUI } from './ui_inspector.js';
 import { execSync, execFile } from 'child_process';
 import { promisify } from 'util';
+import { getWebhookConfig, saveWebhookConfig, sendWebhookNotification, sendTestWebhook } from './lib/webhook_notifier.mjs';
+import { setManualKeepAwake, setAutoBusyKeepAwake, getKeepAwakeState, stopKeepAwake } from './lib/keep_awake.mjs';
 
 const execFileAsync = promisify(execFile);
 
@@ -47,6 +51,49 @@ let cachedModelsAt = 0;
 let cachedQuota = null;
 let cachedQuotaAt = 0;
 let isUiMenuBusy = false;
+let activeWss = null;
+const pairTokens = new Map();
+const promptQueue = [];
+const MAX_PAIR_TOKENS = 20;
+const PAIR_TOKEN_TTL_MS = 120 * 1000;
+const MAX_QUEUE_ITEMS = 20;
+
+function broadcastWss(payload) {
+    if (!activeWss) return;
+    const serialized = JSON.stringify(payload);
+    activeWss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+            try { client.send(serialized); } catch {}
+        }
+    });
+}
+
+function getTunnelUrlsSnapshot() {
+    const statePath = join(__dirname, 'tunnel_state.json');
+    const localUrl = `http://${getLocalIP()}:${SERVER_PORT}`;
+    try {
+        if (fs.existsSync(statePath)) {
+            const data = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+            return {
+                publicUrl: String(data.publicUrl || '').trim(),
+                localUrl: String(data.localUrl || localUrl).trim()
+            };
+        }
+    } catch {}
+    return { publicUrl: '', localUrl };
+}
+
+function cleanupExpiredPairTokens() {
+    const now = Date.now();
+    for (const [k, exp] of pairTokens.entries()) {
+        if (!exp || exp <= now) pairTokens.delete(k);
+    }
+    while (pairTokens.size >= MAX_PAIR_TOKENS) {
+        const oldest = pairTokens.keys().next().value;
+        if (!oldest) break;
+        pairTokens.delete(oldest);
+    }
+}
 
 // Kill any existing process on the server port (prevents EADDRINUSE)
 function killPortProcess(port) {
@@ -1991,6 +2038,13 @@ async function startPolling(wss) {
     let lastErrorLog = 0;
     let isConnecting = false;
     let zeroContextCount = 0;
+    let lastChangeAt = Date.now();
+    let lastKnownBusy = false;
+    let lastAppStatePollAt = 0;
+    let busySince = 0;
+    let prevBusyForHook = false;
+    let prevPendingSig = '';
+    let idleStableTicks = 0;
 
     const poll = async () => {
         if (!cdpConnection || (cdpConnection.ws && cdpConnection.ws.readyState !== WebSocket.OPEN)) {
@@ -2004,11 +2058,14 @@ async function startPolling(wss) {
                 cdpConnection = null;
             }
             zeroContextCount = 0;
+            lastKnownBusy = false;
+            setAutoBusyKeepAwake(false);
             try {
                 await initCDP();
                 if (cdpConnection) {
                     console.log('✅ CDP Connection established from polling loop');
                     isConnecting = false;
+                    lastChangeAt = Date.now();
                 }
             } catch (err) {
                 // Not found yet, just wait for next cycle
@@ -2031,6 +2088,7 @@ async function startPolling(wss) {
                 if (hash !== lastSnapshotHash) {
                     lastSnapshot = snapshot;
                     lastSnapshotHash = hash;
+                    lastChangeAt = Date.now();
 
                     // Broadcast to all connected clients
                     wss.clients.forEach(client => {
@@ -2074,7 +2132,63 @@ async function startPolling(wss) {
             console.error('Poll error:', err.message);
         }
 
-        setTimeout(poll, POLL_INTERVAL);
+        // Lightweight app-state monitoring (~2.5s) for adaptive interval, keep-awake, offline webhooks & prompt queue drain
+        const nowTs = Date.now();
+        if (cdpConnection && !isUiMenuBusy && (nowTs - lastAppStatePollAt >= 2400)) {
+            lastAppStatePollAt = nowTs;
+            try {
+                const st = await getAppState(cdpConnection);
+                if (st && !st.error) {
+                    lastKnownBusy = Boolean(st.isBusy);
+                    setAutoBusyKeepAwake(lastKnownBusy);
+
+                    if (lastKnownBusy && !prevBusyForHook) {
+                        busySince = nowTs;
+                    } else if (!lastKnownBusy && prevBusyForHook) {
+                        if (busySince && (nowTs - busySince >= 5000)) {
+                            const { publicUrl, localUrl } = getTunnelUrlsSnapshot();
+                            const chatLabel = st.chatTitle ? `会话「${st.chatTitle}」已生成完毕，可前往查看。` : '长任务已完成，可前往手机端查看结果。';
+                            sendWebhookNotification('task_done', 'Antigravity 任务已完成', chatLabel, publicUrl || localUrl).catch(() => {});
+                        }
+                        busySince = 0;
+                    }
+                    prevBusyForHook = lastKnownBusy;
+
+                    const pending = Array.isArray(st.pendingActions) ? st.pendingActions : [];
+                    const sig = pending.map(a => `${a.kind || ''}:${a.text || ''}`).join('|');
+                    if (pending.length > 0 && sig !== prevPendingSig) {
+                        const { publicUrl, localUrl } = getTunnelUrlsSnapshot();
+                        const actionSummary = pending.map(a => a.text || '点击确认').slice(0, 3).join(' / ');
+                        sendWebhookNotification('approval', 'Antigravity 等待审批确认', `待确认操作：${actionSummary}`, publicUrl || localUrl).catch(() => {});
+                    }
+                    prevPendingSig = sig;
+
+                    if (promptQueue.length > 0 && !lastKnownBusy && pending.length === 0) {
+                        idleStableTicks++;
+                        if (idleStableTicks >= 2) {
+                            const nextItem = promptQueue.shift();
+                            idleStableTicks = 0;
+                            if (nextItem && nextItem.message) {
+                                lastKnownBusy = true;
+                                prevBusyForHook = true;
+                                busySince = Date.now();
+                                lastChangeAt = Date.now();
+                                broadcastWss({ type: 'queue_update', queue: promptQueue });
+                                await injectMessage(cdpConnection, nextItem.message).catch(() => {});
+                            }
+                        }
+                    } else {
+                        idleStableTicks = 0;
+                    }
+                }
+            } catch {}
+        }
+
+        const sinceChange = Date.now() - lastChangeAt;
+        const nextDelay = (lastKnownBusy || sinceChange < 15000)
+            ? 800
+            : (sinceChange < 30000 ? POLL_INTERVAL : 3500);
+        setTimeout(poll, nextDelay);
     };
 
     poll();
@@ -2130,7 +2244,7 @@ async function createServer() {
 
     // Auth Middleware
     app.use((req, res, next) => {
-        const publicPaths = ['/login', '/login.html', '/favicon.ico', '/manifest.json', '/icon.svg'];
+        const publicPaths = ['/login', '/login.html', '/pair', '/sw.js', '/favicon.ico', '/manifest.json', '/icon.svg'];
         if (publicPaths.includes(req.path) || req.path.startsWith('/css/')) {
             return next();
         }
@@ -2197,6 +2311,59 @@ async function createServer() {
     app.post('/logout', (req, res) => {
         res.clearCookie(AUTH_COOKIE_NAME);
         res.json({ success: true });
+    });
+
+    // One-time QR code auto-login endpoint (public path)
+    app.get('/pair', (req, res) => {
+        const token = String(req.query.t || '').trim();
+        cleanupExpiredPairTokens();
+        const expiresAt = pairTokens.get(token);
+        if (!token || !expiresAt || expiresAt <= Date.now()) {
+            pairTokens.delete(token);
+            return res.redirect('/login.html?err=pair_expired');
+        }
+        pairTokens.delete(token);
+        res.cookie(AUTH_COOKIE_NAME, AUTH_TOKEN, {
+            httpOnly: true,
+            signed: true,
+            maxAge: 30 * 24 * 60 * 60 * 1000 // 30 days
+        });
+        return res.redirect('/');
+    });
+
+    // Generate short-lived QR pairing token + SVG (authenticated)
+    app.post('/pair-token', async (req, res) => {
+        try {
+            cleanupExpiredPairTokens();
+            const token = crypto.randomBytes(16).toString('hex');
+            pairTokens.set(token, Date.now() + PAIR_TOKEN_TTL_MS);
+
+            const { publicUrl, localUrl } = getTunnelUrlsSnapshot();
+            const reqOrigin = `${req.protocol}://${req.get('host')}`;
+            const cleanPublic = publicUrl ? publicUrl.replace(/\/+$/, '') : '';
+            const cleanLocal = (localUrl || reqOrigin).replace(/\/+$/, '');
+            const publicPairUrl = cleanPublic ? `${cleanPublic}/pair?t=${token}` : '';
+            const localPairUrl = `${cleanLocal}/pair?t=${token}`;
+            const prefer = String(req.body?.prefer || '').toLowerCase();
+            const activePairUrl = (prefer === 'local' || !publicPairUrl) ? localPairUrl : publicPairUrl;
+            const svg = await QRCode.toString(activePairUrl, {
+                type: 'svg',
+                margin: 1,
+                width: 210,
+                color: { dark: '#0f172a', light: '#ffffff' }
+            });
+            return res.json({
+                success: true,
+                token,
+                expiresInSec: Math.round(PAIR_TOKEN_TTL_MS / 1000),
+                publicPairUrl,
+                localPairUrl,
+                activePairUrl,
+                svg
+            });
+        } catch (err) {
+            return res.status(500).json({ success: false, error: err.message });
+        }
     });
 
     // Get current snapshot (supports cssHash & htmlHash delta caching for ultra-fast mobile updates)
@@ -2531,6 +2698,7 @@ async function createServer() {
         res.json(results);
     });
 
+    activeWss = wss;
     wss.on('error', (err) => {
         console.warn('⚠️ WebSocket server error:', err.message);
     });
@@ -3195,6 +3363,219 @@ async function main() {
             return null;
         }
 
+        // Resolve active workspace root (fallback cleanly when not a git repo)
+        async function resolveWorkspaceRoot() {
+            const gitRoot = await resolveGitRoot();
+            if (gitRoot) return gitRoot;
+            const candidates = [
+                process.env.WORKSPACE_PATH,
+                join(__dirname, '..'),
+                process.cwd(),
+                __dirname
+            ].filter(Boolean);
+            for (const dir of candidates) {
+                if (fs.existsSync(dir)) return pathResolve(dir);
+            }
+            return __dirname;
+        }
+
+        function validateRelPathSafe(relRaw) {
+            const rel = String(relRaw || '').trim().replace(/\\/g, '/');
+            if (!rel || rel.startsWith('/') || rel.startsWith('-') || /^[a-zA-Z]:/.test(rel) || rel.includes('\0')) {
+                return null;
+            }
+            const parts = rel.split('/');
+            if (parts.some(p => p === '..' || p === '.')) return null;
+            return rel;
+        }
+
+        // --- Host Keep-Awake (P0-2) ---
+        app.get('/keep-awake', (req, res) => {
+            res.json({ success: true, ...getKeepAwakeState() });
+        });
+
+        app.post('/keep-awake', (req, res) => {
+            const enabled = Boolean(req.body?.enabled);
+            const state = setManualKeepAwake(enabled);
+            res.json({ success: true, ...state });
+        });
+
+        // --- Offline Webhook Push Config & Test (P1-1) ---
+        app.get('/webhook-config', (req, res) => {
+            res.json({ success: true, ...getWebhookConfig() });
+        });
+
+        app.post('/webhook-config', (req, res) => {
+            try {
+                const saved = saveWebhookConfig(req.body || {});
+                res.json({ success: true, ...saved });
+            } catch (err) {
+                res.status(400).json({ success: false, error: err.message });
+            }
+        });
+
+        app.post('/webhook-test', async (req, res) => {
+            try {
+                const { publicUrl, localUrl } = getTunnelUrlsSnapshot();
+                const result = await sendTestWebhook(req.body || null, publicUrl || localUrl);
+                if (!result.ok) {
+                    return res.status(502).json({ success: false, error: result.error || result.reason || '推送失败', details: result });
+                }
+                return res.json({ success: true, channel: result.channel });
+            } catch (err) {
+                return res.status(400).json({ success: false, error: err.message });
+            }
+        });
+
+        // --- Busy-State Prompt Queue (P1-2) ---
+        app.get('/queue', (req, res) => {
+            res.json({ success: true, queue: promptQueue });
+        });
+
+        app.post('/queue', (req, res) => {
+            const message = String(req.body?.message || '').trim();
+            if (!message) return res.status(400).json({ success: false, error: '指令内容不能为空' });
+            if (promptQueue.length >= MAX_QUEUE_ITEMS) {
+                return res.status(400).json({ success: false, error: `排队已达上限（最多 ${MAX_QUEUE_ITEMS} 条）` });
+            }
+            const item = {
+                id: crypto.randomBytes(6).toString('hex'),
+                message: message.slice(0, 8000),
+                createdAt: new Date().toISOString()
+            };
+            promptQueue.push(item);
+            broadcastWss({ type: 'queue_update', queue: promptQueue });
+            return res.json({ success: true, item, queue: promptQueue });
+        });
+
+        app.delete('/queue/:id', (req, res) => {
+            const id = String(req.params.id || '');
+            const idx = promptQueue.findIndex(q => q.id === id);
+            if (idx === -1) return res.status(404).json({ success: false, error: '队列项不存在' });
+            promptQueue.splice(idx, 1);
+            broadcastWss({ type: 'queue_update', queue: promptQueue });
+            return res.json({ success: true, queue: promptQueue });
+        });
+
+        app.post('/queue/clear', (req, res) => {
+            promptQueue.length = 0;
+            broadcastWss({ type: 'queue_update', queue: promptQueue });
+            return res.json({ success: true, queue: promptQueue });
+        });
+
+        app.post('/queue/send-now', async (req, res) => {
+            const id = String(req.body?.id || '');
+            const idx = promptQueue.findIndex(q => q.id === id);
+            if (idx === -1) return res.status(404).json({ success: false, error: '队列项不存在' });
+            if (!cdpConnection) return res.status(503).json({ success: false, error: 'CDP 未连接' });
+            const [item] = promptQueue.splice(idx, 1);
+            broadcastWss({ type: 'queue_update', queue: promptQueue });
+            const result = await injectMessage(cdpConnection, item.message).catch(e => ({ ok: false, error: e.message }));
+            return res.json({ success: result.ok !== false, queue: promptQueue, details: result });
+        });
+
+        // --- Read-Only Workspace File Tree & Preview (P1-3) ---
+        const IGNORED_DIRS = new Set(['.git', 'node_modules', 'dist', 'build', '.next', '.cache', 'certs']);
+
+        app.get('/files', async (req, res) => {
+            try {
+                const root = await resolveWorkspaceRoot();
+                const rootAbs = pathResolve(root);
+                const dirRaw = String(req.query.dir || '').trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+                const q = String(req.query.q || '').trim().toLowerCase();
+
+                if (dirRaw) {
+                    const checked = validateRelPathSafe(dirRaw);
+                    if (!checked) return res.status(400).json({ success: false, error: '目录路径非法' });
+                }
+
+                const targetAbs = dirRaw ? pathResolve(rootAbs, dirRaw) : rootAbs;
+                const relCheck = pathRelative(rootAbs, targetAbs);
+                if (relCheck.startsWith('..') || !fs.existsSync(targetAbs) || !fs.statSync(targetAbs).isDirectory()) {
+                    return res.status(400).json({ success: false, error: '目录不存在或越界' });
+                }
+
+                const entries = [];
+                if (q) {
+                    const walk = (absDir, relPrefix, depth) => {
+                        if (depth > 5 || entries.length >= 120) return;
+                        let list = [];
+                        try { list = fs.readdirSync(absDir, { withFileTypes: true }); } catch { return; }
+                        for (const d of list) {
+                            if (entries.length >= 120) break;
+                            if (IGNORED_DIRS.has(d.name)) continue;
+                            const nextRel = relPrefix ? `${relPrefix}/${d.name}` : d.name;
+                            const nextAbs = join(absDir, d.name);
+                            if (d.isDirectory()) {
+                                walk(nextAbs, nextRel, depth + 1);
+                            } else if (d.isFile() && nextRel.toLowerCase().includes(q)) {
+                                let size = 0;
+                                try { size = fs.statSync(nextAbs).size; } catch {}
+                                entries.push({ name: d.name, path: nextRel, isDir: false, size });
+                            }
+                        }
+                    };
+                    walk(targetAbs, dirRaw, 0);
+                } else {
+                    const list = fs.readdirSync(targetAbs, { withFileTypes: true });
+                    list.sort((a, b) => {
+                        if (a.isDirectory() !== b.isDirectory()) return a.isDirectory() ? -1 : 1;
+                        return a.name.localeCompare(b.name);
+                    });
+                    for (const d of list) {
+                        if (entries.length >= 200) break;
+                        if (IGNORED_DIRS.has(d.name)) continue;
+                        const nextRel = dirRaw ? `${dirRaw}/${d.name}` : d.name;
+                        const nextAbs = join(targetAbs, d.name);
+                        let size = 0;
+                        if (d.isFile()) {
+                            try { size = fs.statSync(nextAbs).size; } catch {}
+                        }
+                        entries.push({ name: d.name, path: nextRel, isDir: d.isDirectory(), size });
+                    }
+                }
+
+                return res.json({
+                    success: true,
+                    rootName: rootAbs.split(/[\\/]/).pop() || 'workspace',
+                    dir: dirRaw,
+                    entries
+                });
+            } catch (err) {
+                return res.status(500).json({ success: false, error: err.message });
+            }
+        });
+
+        app.get('/file-content', async (req, res) => {
+            const rel = validateRelPathSafe(req.query.path);
+            if (!rel) return res.status(400).json({ success: false, error: '文件路径非法' });
+            try {
+                const rootAbs = pathResolve(await resolveWorkspaceRoot());
+                const fileAbs = pathResolve(rootAbs, rel);
+                const relCheck = pathRelative(rootAbs, fileAbs);
+                if (!relCheck || relCheck.startsWith('..')) {
+                    return res.status(400).json({ success: false, error: '路径越界' });
+                }
+                if (!fs.existsSync(fileAbs)) {
+                    return res.status(404).json({ success: false, error: '文件不存在' });
+                }
+                const st = fs.statSync(fileAbs);
+                if (!st.isFile()) {
+                    return res.status(400).json({ success: false, error: '目标不是文本文件' });
+                }
+                if (st.size > 200 * 1024) {
+                    return res.status(413).json({ success: false, error: `文件过大（${Math.round(st.size / 1024)} KB，上限 200 KB）` });
+                }
+                const buf = fs.readFileSync(fileAbs);
+                if (buf.includes(0)) {
+                    return res.status(415).json({ success: false, error: '二进制文件不支持文本预览' });
+                }
+                return res.json({ success: true, path: rel, content: buf.toString('utf8'), size: st.size });
+            } catch (err) {
+                return res.status(500).json({ success: false, error: err.message });
+            }
+        });
+
         // Workspace Git status summary
         app.get('/git-status', async (req, res) => {
             try {
@@ -3222,8 +3603,14 @@ async function main() {
                     if (filePath.includes(' -> ')) filePath = filePath.split(' -> ').pop().trim();
                     filePath = filePath.replace(/^"|"$/g, '');
                     const stat = statsMap.get(filePath) || { ins: 0, del: 0 };
+                    const x = code[0] || ' ';
+                    const y = code[1] || ' ';
+                    const staged = x !== ' ' && x !== '?';
+                    const unstaged = y !== ' ' || code === '??';
                     return {
                         status: code.trim() || 'M',
+                        staged,
+                        unstaged,
                         path: filePath,
                         insertions: stat.ins,
                         deletions: stat.del
@@ -3239,6 +3626,76 @@ async function main() {
                 });
             } catch (err) {
                 res.status(500).json({ success: false, error: err.message, files: [] });
+            }
+        });
+
+        // Workspace Git write actions: Stage / Unstage / Commit / Discard (P1-4)
+        app.post('/git-stage', async (req, res) => {
+            try {
+                const gitRoot = await resolveGitRoot();
+                if (!gitRoot) return res.status(404).json({ success: false, error: '当前工作区不是 Git 仓库' });
+                const all = Boolean(req.body?.all);
+                const unstage = Boolean(req.body?.unstage);
+                if (all) {
+                    const args = unstage ? ['-C', gitRoot, 'reset', 'HEAD'] : ['-C', gitRoot, 'add', '-A'];
+                    await execFileAsync('git', args, { timeout: 5000 });
+                    return res.json({ success: true });
+                }
+                const relFile = validateRelPathSafe(req.body?.file);
+                if (!relFile) return res.status(400).json({ success: false, error: '文件路径非法' });
+                const args = unstage
+                    ? ['-C', gitRoot, 'reset', 'HEAD', '--', relFile]
+                    : ['-C', gitRoot, 'add', '--', relFile];
+                await execFileAsync('git', args, { timeout: 5000 });
+                return res.json({ success: true });
+            } catch (err) {
+                return res.status(500).json({ success: false, error: err.message });
+            }
+        });
+
+        app.post('/git-commit', async (req, res) => {
+            const message = String(req.body?.message || '').trim();
+            if (!message) return res.status(400).json({ success: false, error: '请填写提交说明 (Commit Message)' });
+            if (message.length > 200) return res.status(400).json({ success: false, error: '提交说明过长（上限 200 字）' });
+            try {
+                const gitRoot = await resolveGitRoot();
+                if (!gitRoot) return res.status(404).json({ success: false, error: '当前工作区不是 Git 仓库' });
+                const { stdout: stagedOut } = await execFileAsync('git', ['-C', gitRoot, 'diff', '--cached', '--name-only'], { timeout: 4000 });
+                if (!stagedOut.trim()) {
+                    return res.status(400).json({ success: false, error: '没有已暂存的改动，请先暂存文件' });
+                }
+                const { stdout } = await execFileAsync('git', ['-C', gitRoot, 'commit', '-m', message], { timeout: 8000 });
+                return res.json({ success: true, summary: stdout.trim() });
+            } catch (err) {
+                return res.status(500).json({ success: false, error: err.message });
+            }
+        });
+
+        app.post('/git-discard', async (req, res) => {
+            const relFile = validateRelPathSafe(req.body?.file);
+            if (!relFile) return res.status(400).json({ success: false, error: '文件路径非法' });
+            try {
+                const gitRoot = pathResolve(await resolveGitRoot() || '');
+                if (!gitRoot) return res.status(404).json({ success: false, error: '当前工作区不是 Git 仓库' });
+                const { stdout: statusOut } = await execFileAsync('git', ['-C', gitRoot, 'status', '--porcelain=v1', '--', relFile], { timeout: 4000 });
+                if (!statusOut.trim()) {
+                    return res.status(404).json({ success: false, error: '该文件没有未提交改动' });
+                }
+                if (statusOut.startsWith('??')) {
+                    const targetAbs = pathResolve(gitRoot, relFile);
+                    const relCheck = pathRelative(gitRoot, targetAbs);
+                    if (!relCheck || relCheck.startsWith('..')) {
+                        return res.status(400).json({ success: false, error: '路径越界' });
+                    }
+                    if (fs.existsSync(targetAbs) && fs.statSync(targetAbs).isFile()) {
+                        fs.rmSync(targetAbs, { force: true });
+                    }
+                } else {
+                    await execFileAsync('git', ['-C', gitRoot, 'checkout', '--', relFile], { timeout: 5000 });
+                }
+                return res.json({ success: true });
+            } catch (err) {
+                return res.status(500).json({ success: false, error: err.message });
             }
         });
 
@@ -3308,6 +3765,7 @@ async function main() {
         // Graceful shutdown handlers
         const gracefulShutdown = (signal) => {
             console.log(`\n🛑 Received ${signal}. Shutting down gracefully...`);
+            stopKeepAwake();
             wss.close(() => {
                 console.log('   WebSocket server closed');
             });

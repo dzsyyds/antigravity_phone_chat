@@ -245,6 +245,12 @@
         const input = document.getElementById('password');
         const error = document.getElementById('error');
 
+        const urlParams = new URLSearchParams(window.location.search);
+        if (urlParams.get('err') === 'pair_expired') {
+            error.textContent = '配对二维码已过期或已失效，请重新扫码或输入访问口令';
+            error.style.display = 'block';
+        }
+
         async function doLogin() {
             const password = input.value;
             if (!password) {
